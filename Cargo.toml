@@ -1,0 +1,18 @@
+[package]
+name = "espflashtool"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+
+[[bin]]
+name = "timing"
+path = "tools/timing.rs"
+
+[dependencies]
+anyhow = "^1.0.52"
+serialport = "^4.0.1"
+slip-codec = "^0.3.2"
+thiserror = "1.0"
