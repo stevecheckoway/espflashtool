@@ -2,7 +2,8 @@ extern crate anyhow;
 
 use anyhow::{bail, Result};
 use espflashtool::event::{Event, EventCollector, EventTracer};
-use espflashtool::{is_timeout, Connection};
+use espflashtool::Connection;
+use espflashtool::timeout::ErrorExt;
 use std::time::{Duration, Instant};
 
 static WAITING_FOR_DOWNLOAD: &[u8] = b"waiting for download\r\n";
@@ -15,7 +16,7 @@ fn time_waiting_for_download(connection: &mut Connection) -> Result<Duration> {
         connection.reset()?;
         loop {
             let line = connection.read_line(Duration::from_secs(2));
-            if is_timeout(&line) {
+            if line.is_timeout() {
                 break;
             }
             if line? == WAITING_FOR_DOWNLOAD {

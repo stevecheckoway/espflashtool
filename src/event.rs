@@ -6,7 +6,7 @@ use std::io;
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
-use super::{Command, CommandError};
+use crate::command::{Command, CommandError};
 
 #[derive(Debug, Clone)]
 pub enum Event<'a> {
