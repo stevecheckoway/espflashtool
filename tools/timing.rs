@@ -31,7 +31,7 @@ fn time_waiting_for_download(connection: &mut Connection) -> Result<Duration> {
     let events: Vec<(Instant, Event)> = ec.collect();
 
     if let Some(idx) = events.iter().position(|(_timestamp, event)| {
-        matches!(event, Event::SerialLine(line) if line == b"waiting for download\r\n")
+        matches!(event, Event::SerialLine(line) if line.as_ref() == b"waiting for download\r\n")
     }) {
         let start = events[0].0;
         let end = events[idx].0;
@@ -61,8 +61,19 @@ fn time_connect(connection: &mut Connection) -> Result<Duration> {
     bail!("Did not find sync response")
 }
 
+fn time_read_reg(connection: &mut Connection) -> Result<Duration> {
+    connection.connect()?;
+    let ec = EventCollector::new();
+    connection.add_observer(ec.observer());
+    connection.read_reg(0x40001000)?;
+    let events: Vec<(Instant, Event)> = ec.collect();
+    return Ok(events[events.len() - 1].0 - events[0].0);
+}
+
+
 fn main() -> Result<()> {
     let port = "/dev/tty.SLAB_USBtoUART";
+
     let mut connection = Connection::new(port)?;
     let tracer = EventTracer::new(std::io::stdout(), |e| {
         !matches!(e, Event::SerialRead(..) | Event::SerialWrite(..))
@@ -78,6 +89,12 @@ fn main() -> Result<()> {
     let time = time_connect(&mut connection)?;
     println!(
         "Takes  {:.3} seconds to connect",
+        time.as_secs_f32()
+    );
+
+    let time = time_read_reg(&mut connection)?;
+    println!(
+        "Takes  {:.3} seconds to read_reg",
         time.as_secs_f32()
     );
 

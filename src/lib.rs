@@ -5,8 +5,9 @@ extern crate slip_codec;
 
 pub mod event;
 
-use std::rc::Weak;
+use std::borrow::Cow;
 use std::io::{self, Cursor};
+use std::rc::Weak;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -161,10 +162,9 @@ fn from_le32(data: &[u8]) -> u32 {
 pub fn is_timeout<T>(result: &Result<T>) -> bool {
     match result {
         Ok(_) => false,
-        Err(err) => {
-            err.downcast_ref::<io::Error>()
-                .map_or(false, |ce| ce.kind() == io::ErrorKind::TimedOut)
-        }
+        Err(err) => err
+            .downcast_ref::<io::Error>()
+            .map_or(false, |ce| ce.kind() == io::ErrorKind::TimedOut),
     }
 }
 
@@ -180,7 +180,8 @@ impl Connection {
     }
 
     pub fn add_observer<E>(&mut self, observer: Weak<E>)
-        where E: EventObserver + 'static
+    where
+        E: EventObserver + 'static,
     {
         self.observers.push(observer);
     }
@@ -227,11 +228,11 @@ impl Connection {
         let mut output: Vec<u8> = Vec::with_capacity(data.len() + 8);
 
         encoder.encode(&data, &mut output)?;
-        self.trace(Event::SlipWrite(data));
+        self.trace(Event::SlipWrite(Cow::from(&data)));
 
         self.serial.set_timeout(DEFAULT_SERIAL_WRITE_TIMEOUT)?;
         self.serial.write_all(&output)?;
-        self.trace(Event::SerialWrite(output));
+        self.trace(Event::SerialWrite(Cow::from(&output)));
 
         self.read_response(cmd_code, timeout)
     }
@@ -256,7 +257,7 @@ impl Connection {
                 Ok(_) => {
                     // A complete packet has been decoded.
                     let len = cursor.position() as usize;
-                    self.trace(Event::SlipRead(response.clone()));
+                    self.trace(Event::SlipRead(Cow::from(&response)));
                     self.buffer.drain(..len);
                     if response.len() < 10 || response[0] != 1 || response[1] != cmd_code || {
                         let size = from_le16(&response[2..4]) as usize;
@@ -283,7 +284,7 @@ impl Connection {
             0 => {
                 let value = from_le32(&response[4..8]);
                 let data = response[8..response.len() - status_size].to_vec();
-                self.trace(Event::Response(value, data.clone()));
+                self.trace(Event::Response(value, Cow::from(&data)));
                 Ok((value, data))
             }
             1 => {
@@ -306,8 +307,8 @@ impl Connection {
 
         loop {
             if let Some(idx) = self.buffer.iter().position(|&x| x == b'\n') {
-                line.extend(self.buffer.drain(..idx+1));
-                self.trace(Event::SerialLine(line.clone()));
+                line.extend(self.buffer.drain(..idx + 1));
+                self.trace(Event::SerialLine(Cow::from(&line)));
                 return Ok(line);
             }
             line.append(&mut self.buffer);
@@ -321,7 +322,7 @@ impl Connection {
         match self.serial.read(&mut self.buffer) {
             Ok(n) => {
                 self.buffer.truncate(n);
-                self.trace(Event::SerialRead(self.buffer.clone()));
+                self.trace_only(Event::SerialRead(Cow::from(&self.buffer)));
                 Ok(())
             }
             Err(err) => {
@@ -336,12 +337,20 @@ impl Connection {
         let now = Instant::now();
         // Remove any observers that have been dropped and notify the others.
         self.observers.retain(|observer| {
-            Weak::upgrade(observer)
-                .map_or(false, |observer| {
-                    observer.notify(now, &event);
-                    true
-                })
+            Weak::upgrade(observer).map_or(false, |observer| {
+                observer.notify(now, &event);
+                true
+            })
         });
+    }
+
+    fn trace_only(&self, event: Event) {
+        let now = Instant::now();
+        for observer in &self.observers {
+            if let Some(observer) = Weak::upgrade(observer) {
+                observer.notify(now, &event);
+            }
+        }
     }
 
     pub fn connect(&mut self) -> Result<()> {
@@ -357,8 +366,11 @@ impl Connection {
             }
         }
         if !waiting {
-            return Err(io::Error::new(io::ErrorKind::TimedOut,
-                 "Timed out waiting for \"waiting for download\\r\\n\"").into());
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timed out waiting for \"waiting for download\\r\\n\"",
+            )
+            .into());
         }
         for _ in 0..10 {
             let result = self.sync();
@@ -407,5 +419,10 @@ impl Connection {
         }
 
         Ok(())
+    }
+
+    pub fn read_reg(&mut self, address: u32) -> Result<u32> {
+        self.send(Command::ReadReg { address })
+            .map(|(value, _data)| value)
     }
 }

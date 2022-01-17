@@ -1,4 +1,5 @@
-use std::cell::{RefCell, Cell};
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use std::cmp::min;
 use std::fmt::Write;
 use std::io;
@@ -8,16 +9,33 @@ use std::time::Instant;
 use super::{Command, CommandError};
 
 #[derive(Debug, Clone)]
-pub enum Event {
+pub enum Event<'a> {
     Reset,
-    SerialRead(Vec<u8>),
-    SerialWrite(Vec<u8>),
-    SerialLine(Vec<u8>),
-    SlipRead(Vec<u8>),
-    SlipWrite(Vec<u8>),
+    SerialRead(Cow<'a, [u8]>),
+    SerialWrite(Cow<'a, [u8]>),
+    SerialLine(Cow<'a, [u8]>),
+    SlipRead(Cow<'a, [u8]>),
+    SlipWrite(Cow<'a, [u8]>),
     Command(Command),
-    Response(u32, Vec<u8>),
+    Response(u32, Cow<'a, [u8]>),
     Error(CommandError),
+}
+
+impl<'a> Event<'a> {
+    pub fn into_owned(self) -> Event<'static> {
+        use Event::*;
+        match self {
+            Reset => Reset,
+            SerialRead(data) => SerialRead(Cow::Owned(data.into_owned())),
+            SerialWrite(data) => SerialWrite(Cow::Owned(data.into_owned())),
+            SerialLine(data) => SerialLine(Cow::Owned(data.into_owned())),
+            SlipRead(data) => SlipRead(Cow::Owned(data.into_owned())),
+            SlipWrite(data) => SlipWrite(Cow::Owned(data.into_owned())),
+            Command(cmd) => Command(cmd),
+            Response(value, data) => Response(value, Cow::Owned(data.into_owned())),
+            Error(err) => Error(err),
+        }
+    }
 }
 
 fn format_data(f: &mut std::fmt::Formatter<'_>, data: &[u8]) -> std::fmt::Result {
@@ -59,7 +77,7 @@ fn format_data(f: &mut std::fmt::Formatter<'_>, data: &[u8]) -> std::fmt::Result
     Ok(())
 }
 
-impl std::fmt::Display for Event {
+impl<'a> std::fmt::Display for Event<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Event::Reset => f.write_str("Reset"),
@@ -104,11 +122,11 @@ impl std::fmt::Display for Event {
 }
 
 pub trait EventObserver {
-    fn notify(&self, timestamp: Instant, event: &Event);
+    fn notify(&self, timestamp: Instant, event: &Event<'_>);
 }
 
 #[derive(Debug)]
-pub struct EventCollectorObserver(RefCell<Vec<(Instant, Event)>>);
+pub struct EventCollectorObserver(RefCell<Vec<(Instant, Event<'static>)>>);
 
 pub struct EventCollector {
     observer: Rc<EventCollectorObserver>,
@@ -125,7 +143,7 @@ impl EventCollector {
         return Rc::downgrade(&self.observer);
     }
 
-    pub fn collect(self) -> Vec<(Instant, Event)> {
+    pub fn collect(self) -> Vec<(Instant, Event<'static>)> {
         Rc::try_unwrap(self.observer)
             .expect("Failed to collect events from EventCollector")
             .0
@@ -134,8 +152,8 @@ impl EventCollector {
 }
 
 impl EventObserver for EventCollectorObserver {
-    fn notify(&self, timestamp: Instant, event: &Event) {
-        self.0.borrow_mut().push((timestamp, event.clone()))
+    fn notify<'a>(&self, timestamp: Instant, event: &Event<'a>) {
+        self.0.borrow_mut().push((timestamp, event.clone().into_owned()))
     }
 }
 
@@ -145,7 +163,7 @@ pub struct EventTracerObserver<W, F> {
     last: Cell<Option<Instant>>,
 }
 
-pub struct EventTracer<W,F> {
+pub struct EventTracer<W, F> {
     observer: Rc<EventTracerObserver<W, F>>,
 }
 
@@ -174,10 +192,10 @@ where
     W: io::Write,
     F: Fn(&Event) -> bool,
 {
-    fn notify(&self, timestamp: Instant, event: &Event) {
+    fn notify<'a>(&self, timestamp: Instant, event: &Event<'a>) {
         if (self.filter)(event) {
             let delta = timestamp - self.last.replace(Some(timestamp)).unwrap_or(timestamp);
-            println!("TRACE +{:.3} {:}", delta.as_secs_f32(), event);    
+            println!("TRACE +{:.3} {:}", delta.as_secs_f32(), event);
         }
     }
 }
