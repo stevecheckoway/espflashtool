@@ -17,8 +17,9 @@ pub enum Event<'a> {
     SlipRead(Cow<'a, [u8]>),
     SlipWrite(Cow<'a, [u8]>),
     Command(Command),
-    Response(u32, Cow<'a, [u8]>),
-    Error(CommandError),
+    // Command, status, error, value, data
+    Response(u8, u8, u8, u32, Cow<'a, [u8]>),
+    InvalidResponse(Cow<'a, [u8]>),
 }
 
 impl<'a> Event<'a> {
@@ -32,8 +33,8 @@ impl<'a> Event<'a> {
             SlipRead(data) => SlipRead(Cow::Owned(data.into_owned())),
             SlipWrite(data) => SlipWrite(Cow::Owned(data.into_owned())),
             Command(cmd) => Command(cmd),
-            Response(value, data) => Response(value, Cow::Owned(data.into_owned())),
-            Error(err) => Error(err),
+            Response(cmd, status, err, value, data) => Response(cmd, status, err, value, Cow::Owned(data.into_owned())),
+            InvalidResponse(data) => InvalidResponse(Cow::Owned(data.into_owned())),
         }
     }
 }
@@ -106,17 +107,27 @@ impl<'a> std::fmt::Display for Event<'a> {
                 format_data(f, data)
             }
             Event::Command(cmd) => {
-                write!(f, "Command {:?}", cmd)
+                write!(f, "Command cmd={:?} ({:02X})", cmd, cmd.code())
             }
-            Event::Response(value, data) => {
-                write!(f, "Response value={:08X}", value)?;
+            Event::Response(cmd_code, status, err_code, value, data) => {
+                let cmd = Command::name_from_code(*cmd_code);
+                write!(f, "Response cmd={cmd} ({cmd_code:02X}) status={status:02X} ",
+                    cmd=cmd, cmd_code=cmd_code, status=status
+                )?;
+                if *status != 0 {
+                    write!(f, "err={} ({:02X}) ", CommandError::from(*err_code), err_code)?;
+                }
+                write!(f, "value={:08X}", value)?;
                 if !data.is_empty() {
                     write!(f, " data:\n")?;
                     format_data(f, data)?;
                 }
                 Ok(())
             }
-            Event::Error(err) => write!(f, "Error: {}", err),
+            Event::InvalidResponse(data) => {
+                write!(f, "Invalid response data:\n")?;
+                format_data(f, data)
+            }
         }
     }
 }
@@ -184,6 +195,16 @@ where
 
     pub fn observer(&self) -> Weak<EventTracerObserver<W, F>> {
         Rc::downgrade(&self.observer)
+    }
+}
+
+impl<W, F> Into<Rc<dyn EventObserver>> for EventTracer<W, F>
+where
+    W: io::Write + 'static,
+    F: Fn(&Event) -> bool + 'static,
+{
+    fn into(self) -> Rc<dyn EventObserver> {
+        self.observer
     }
 }
 

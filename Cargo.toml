@@ -8,11 +8,16 @@ edition = "2021"
 [lib]
 
 [[bin]]
+name = "espflashtool"
+path = "src/main.rs"
+
+[[bin]]
 name = "timing"
 path = "tools/timing.rs"
 
 [dependencies]
 anyhow = "^1.0.52"
+clap = { version = "^3.0.5", features = ["cargo", "color", "suggestions"] }
 serialport = "^4.0.1"
 slip-codec = "^0.3.2"
 thiserror = "1.0"

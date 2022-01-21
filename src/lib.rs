@@ -1,14 +1,11 @@
 #![allow(dead_code)]
-extern crate anyhow;
-extern crate serialport;
-extern crate slip_codec;
 
 mod command;
 pub mod event;
 mod flasher;
 
 pub use anyhow::{Error, Result};
-pub use flasher::Connection;
+pub use flasher::Flasher;
 
 pub mod timeout {
     pub trait ErrorExt {

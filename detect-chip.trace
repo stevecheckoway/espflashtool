@@ -1,0 +1,87 @@
+TRACE +0.000 Reset
+TRACE +0.001 Read 57 bytes:
+    726C006C9C9E7C00 8C6CE07C020C0C0C | rl.l..|. .l.|....
+    8C0C6CEC0C627C8E 8202EC1292729262 | ..l..b|. .....r.b
+    6C0C628CF26E6E9E 6C6E6E9CE2EC0C62 | l.b..nn. lnn....b
+    70708C8E6C726C72 6C               | pp..lrlr l
+
+TRACE +0.103 Command cmd=Sync (08)
+TRACE +0.000 Write packet:
+    0008240000000000 0707122055555555 | ..$..... ....UUUU
+    5555555555555555 5555555555555555 | UUUUUUUU UUUUUUUU
+    5555555555555555 55555555         | UUUUUUUU UUUU
+
+TRACE +0.000 Write 46 bytes:
+    C000082400000000 0007071220555555 | ...$.... .....UUU
+    5555555555555555 5555555555555555 | UUUUUUUU UUUUUUUU
+    5555555555555555 5555555555C0     | UUUUUUUU UUUUU.
+
+TRACE +0.012 Command cmd=Sync (08)
+TRACE +0.000 Write packet:
+    0008240000000000 0707122055555555 | ..$..... ....UUUU
+    5555555555555555 5555555555555555 | UUUUUUUU UUUUUUUU
+    5555555555555555 55555555         | UUUUUUUU UUUU
+
+TRACE +0.000 Write 46 bytes:
+    C000082400000000 0007071220555555 | ...$.... .....UUU
+    5555555555555555 5555555555555555 | UUUUUUUU UUUUUUUU
+    5555555555555555 5555555555C0     | UUUUUUUU UUUUU.
+
+TRACE +0.010 Read 64 bytes:
+    C001080200070712 200000C0C0010802 | ........ ........
+    00070712200000C0 C001080200070712 | ........ ........
+    200000C0C0010802 00070712200000C0 | ........ ........
+    C001080200070712 200000C0C0010802 | ........ ........
+
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.004 Read 32 bytes:
+    00070712200000C0 C001080200070712 | ........ ........
+    200000C0C0010802 00070712200000C0 | ........ ........
+
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.000 Read packet:
+    0108020007071220 0000             | ........ ..
+
+TRACE +0.000 Response cmd=Sync (08) status=00 value=20120707
+TRACE +0.013 Command cmd=ReadReg { address: 1073745920 } (0A)
+TRACE +0.000 Write packet:
+    000A040000000000 00100040         | ........ ...@
+
+TRACE +0.000 Write 14 bytes:
+    C0000A0400000000 0000100040C0     | ........ ....@.
+
+TRACE +0.005 Read 12 bytes:
+    C0010A020001C1F0 FF0000C0         | ........ ....
+
+TRACE +0.000 Read packet:
+    010A020001C1F0FF 0000             | ........ ..
+
+TRACE +0.000 Response cmd=ReadReg (0A) status=00 value=FFF0C101
+TRACE +0.602 Reset
+Esp8266

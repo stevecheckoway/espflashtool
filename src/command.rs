@@ -46,6 +46,43 @@ pub enum Command {
 }
 
 impl Command {
+    pub fn name_from_code(code: u8) -> &'static str {
+        match code {
+            0x02 => "FlashBegin",
+            0x03 => "FlashData",
+            0x04 => "FlashEnd",
+            0x05 => "MemBegin",
+            0x06 => "MemEnd",
+            0x07 => "MemData",
+            0x08 => "Sync",
+            0x09 => "WriteReg",
+            0x0A => "ReadReg",
+            0x0B => "SpiSetParams",
+            0x0D => "SpiAttach",
+            0x0F => "ChangeBaudRate",
+            0x10 => "FlashDeflBegin",
+            0x11 => "FlashDeflData",
+            0x12 => "FlashDeflEnd",
+            0x13 => "SpiFlashMD5",
+            // 0x?? => "Command::"GetSecurityInfo",
+            0xD0 => "EraseFlash",
+            0xD1 => "EraseRegion",
+            0xD2 => "ReadFlash",
+            0xD3 => "RunUserCode",
+            // 0x?? => "FlashEncryptData",
+            _ => "Unknown",
+        }
+    }
+
+    pub fn response_data_len_from_code(code: u8, rom_loader: bool) -> usize {
+        match code {
+            0x02..=0x0B | 0x0D | 0x0F..=0x12 | 0xD0..=0xD3 => 0,
+            0x13 if rom_loader => 32,
+            0x13 => 16,
+            _ => usize::MAX,
+        }
+    }
+
     pub fn code(&self) -> u8 {
         match self {
             Command::FlashBegin { .. } => 0x02,
@@ -104,6 +141,9 @@ pub enum CommandError {
     #[error("Deflate error")]
     DeflateError,
 
+    #[error("Unknown error code")]
+    UnknownErrorCode,
+
     #[error("InvalidResponse")]
     InvalidResponse,
 }
@@ -118,7 +158,7 @@ impl From<u8> for CommandError {
             0x09 => CommandError::FlashReadError,
             0x0A => CommandError::FlashReadLengthError,
             0x0B => CommandError::DeflateError,
-            _ => CommandError::InvalidResponse,
+            _ => CommandError::UnknownErrorCode,
         }
     }
 }
