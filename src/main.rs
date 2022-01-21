@@ -1,8 +1,8 @@
-use anyhow::{Result, Context};
-use clap::{app_from_crate, arg, AppSettings, App, ArgMatches};
+use anyhow::{Context, Result};
+use clap::{app_from_crate, arg, App, AppSettings, ArgMatches};
 
-use espflashtool::Flasher;
 use espflashtool::event::EventTracer;
+use espflashtool::Flasher;
 // use espflashtool::timeout::ErrorExt;
 
 fn arguments() -> ArgMatches {
@@ -12,14 +12,8 @@ fn arguments() -> ArgMatches {
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .arg(arg!(-p --port <PORT> "Path to serial port").required(false))
         .arg(arg!(-t --trace "Trace serial communication").required(false))
-        .subcommand(
-            App::new("detect-chip")
-                .about("Detects the type of the ESP chip")
-        )
-        .subcommand(
-            App::new("list-ports")
-                .about("List serial ports")
-        )
+        .subcommand(App::new("detect-chip").about("Detects the type of the ESP chip"))
+        .subcommand(App::new("list-ports").about("List serial ports"))
         .get_matches()
 }
 
@@ -40,8 +34,7 @@ fn main() -> Result<()> {
             println!("{:?}", chip);
         }
         "list-ports" => {
-            let ports = serialport::available_ports()
-                .context("Failed to detect serial ports")?;
+            let ports = serialport::available_ports().context("Failed to detect serial ports")?;
             println!("{:#?}", ports);
         }
         _ => unreachable!(),

@@ -33,7 +33,9 @@ impl<'a> Event<'a> {
             SlipRead(data) => SlipRead(Cow::Owned(data.into_owned())),
             SlipWrite(data) => SlipWrite(Cow::Owned(data.into_owned())),
             Command(cmd) => Command(cmd),
-            Response(cmd, status, err, value, data) => Response(cmd, status, err, value, Cow::Owned(data.into_owned())),
+            Response(cmd, status, err, value, data) => {
+                Response(cmd, status, err, value, Cow::Owned(data.into_owned()))
+            }
             InvalidResponse(data) => InvalidResponse(Cow::Owned(data.into_owned())),
         }
     }
@@ -83,27 +85,27 @@ impl<'a> std::fmt::Display for Event<'a> {
         match self {
             Event::Reset => f.write_str("Reset"),
             Event::SerialRead(data) => {
-                write!(f, "Read {} bytes:\n", data.len())?;
+                writeln!(f, "Read {} bytes:", data.len())?;
                 format_data(f, data)
             }
             Event::SerialWrite(data) => {
-                write!(f, "Write {} bytes:\n", data.len())?;
+                writeln!(f, "Write {} bytes:", data.len())?;
                 format_data(f, data)
             }
             Event::SerialLine(data) => {
                 if let Ok(line) = std::str::from_utf8(&data[..data.len() - 2]) {
                     write!(f, "Read line: {}", line)
                 } else {
-                    write!(f, "Read line:\n")?;
+                    writeln!(f, "Read line:")?;
                     format_data(f, data)
                 }
             }
             Event::SlipRead(data) => {
-                write!(f, "Read packet:\n")?;
+                writeln!(f, "Read packet:")?;
                 format_data(f, data)
             }
             Event::SlipWrite(data) => {
-                write!(f, "Write packet:\n")?;
+                writeln!(f, "Write packet:")?;
                 format_data(f, data)
             }
             Event::Command(cmd) => {
@@ -111,21 +113,30 @@ impl<'a> std::fmt::Display for Event<'a> {
             }
             Event::Response(cmd_code, status, err_code, value, data) => {
                 let cmd = Command::name_from_code(*cmd_code);
-                write!(f, "Response cmd={cmd} ({cmd_code:02X}) status={status:02X} ",
-                    cmd=cmd, cmd_code=cmd_code, status=status
+                write!(
+                    f,
+                    "Response cmd={cmd} ({cmd_code:02X}) status={status:02X} ",
+                    cmd = cmd,
+                    cmd_code = cmd_code,
+                    status = status
                 )?;
                 if *status != 0 {
-                    write!(f, "err={} ({:02X}) ", CommandError::from(*err_code), err_code)?;
+                    write!(
+                        f,
+                        "err={} ({:02X}) ",
+                        CommandError::from(*err_code),
+                        err_code
+                    )?;
                 }
                 write!(f, "value={:08X}", value)?;
                 if !data.is_empty() {
-                    write!(f, " data:\n")?;
+                    writeln!(f, " data:")?;
                     format_data(f, data)?;
                 }
                 Ok(())
             }
             Event::InvalidResponse(data) => {
-                write!(f, "Invalid response data:\n")?;
+                writeln!(f, "Invalid response data:")?;
                 format_data(f, data)
             }
         }
@@ -151,7 +162,7 @@ impl EventCollector {
     }
 
     pub fn observer(&self) -> Weak<EventCollectorObserver> {
-        return Rc::downgrade(&self.observer);
+        Rc::downgrade(&self.observer)
     }
 
     pub fn collect(self) -> Vec<(Instant, Event<'static>)> {
@@ -162,9 +173,17 @@ impl EventCollector {
     }
 }
 
+impl Default for EventCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventObserver for EventCollectorObserver {
     fn notify<'a>(&self, timestamp: Instant, event: &Event<'a>) {
-        self.0.borrow_mut().push((timestamp, event.clone().into_owned()))
+        self.0
+            .borrow_mut()
+            .push((timestamp, event.clone().into_owned()))
     }
 }
 
@@ -198,13 +217,13 @@ where
     }
 }
 
-impl<W, F> Into<Rc<dyn EventObserver>> for EventTracer<W, F>
+impl<W, F> From<EventTracer<W, F>> for Rc<dyn EventObserver>
 where
     W: io::Write + 'static,
     F: Fn(&Event) -> bool + 'static,
 {
-    fn into(self) -> Rc<dyn EventObserver> {
-        self.observer
+    fn from(et: EventTracer<W, F>) -> Self {
+        et.observer
     }
 }
 

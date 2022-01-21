@@ -2,8 +2,8 @@ extern crate anyhow;
 
 use anyhow::{bail, Result};
 use espflashtool::event::{Event, EventCollector, EventTracer};
-use espflashtool::Flasher;
 use espflashtool::timeout::ErrorExt;
+use espflashtool::Flasher;
 use std::time::{Duration, Instant};
 
 static WAITING_FOR_DOWNLOAD: &[u8] = b"waiting for download\r\n";
@@ -51,9 +51,10 @@ fn time_connect(connection: &mut Flasher) -> Result<Duration> {
     }
     let events: Vec<(Instant, Event)> = ec.collect();
 
-    if let Some(idx) = events.iter().position(|(_timestamp, event)| {
-        matches!(event, Event::Response(..))
-    }) {
+    if let Some(idx) = events
+        .iter()
+        .position(|(_timestamp, event)| matches!(event, Event::Response(..)))
+    {
         let start = events[0].0;
         let end = events[idx].0;
         return Ok(end - start);
@@ -69,9 +70,8 @@ fn time_detect_chip(connection: &mut Flasher) -> Result<Duration> {
     let _chip = connection.detect_chip()?;
     //println!("{:?}", chip);
     let events: Vec<(Instant, Event)> = ec.collect();
-    return Ok(events[events.len() - 1].0 - events[0].0);
+    Ok(events[events.len() - 1].0 - events[0].0)
 }
-
 
 fn main() -> Result<()> {
     let port = "/dev/tty.SLAB_USBtoUART";
@@ -89,16 +89,10 @@ fn main() -> Result<()> {
     );
 
     let time = time_connect(&mut connection)?;
-    println!(
-        "Takes  {:.3} seconds to connect",
-        time.as_secs_f32()
-    );
+    println!("Takes  {:.3} seconds to connect", time.as_secs_f32());
 
     let time = time_detect_chip(&mut connection)?;
-    println!(
-        "Takes  {:.3} seconds to read_reg",
-        time.as_secs_f32()
-    );
+    println!("Takes  {:.3} seconds to read_reg", time.as_secs_f32());
 
     connection.reset(false)
 }

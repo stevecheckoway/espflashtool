@@ -4,7 +4,7 @@ use std::io::{self, Cursor};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, Context, bail};
+use anyhow::{bail, Context, Result};
 use serialport::SerialPort;
 
 use crate::command::{Command, CommandError};
@@ -85,7 +85,7 @@ impl Flasher {
 
     pub fn add_owned_observer<O>(&mut self, observer: O)
     where
-        O: Into<Rc<dyn EventObserver + 'static>>
+        O: Into<Rc<dyn EventObserver + 'static>>,
     {
         let observer = observer.into();
         self.observers.push(Rc::downgrade(&observer));
@@ -105,7 +105,7 @@ impl Flasher {
         let mut encoder = slip_codec::SlipEncoder::new(true);
         let mut output: Vec<u8> = Vec::with_capacity(data.len() + 8);
 
-        encoder.encode(&data, &mut output)?;
+        encoder.encode(data, &mut output)?;
         self.trace(Event::SlipWrite(Cow::from(data)));
 
         self.serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
@@ -168,9 +168,7 @@ impl Flasher {
         match cmd {
             Command::Sync => {
                 data.extend(&[0x07, 0x07, 0x12, 0x20]);
-                for _ in 0..32 {
-                    data.push(0x55);
-                }
+                data.resize(data.len() + 32, 0x55);
             }
             Command::ReadReg { address } => {
                 data.extend(address.to_le_bytes());
@@ -194,7 +192,8 @@ impl Flasher {
     // bytes must arrive within `DEFAULT_SERIAL_TIMEOUT`.
     fn read_response(&mut self, cmd_code: u8, timeout: Duration) -> Result<(u32, Vec<u8>)> {
         let start_time = Instant::now();
-        let expected_response_size = Command::response_data_len_from_code(cmd_code, self.rom_loader);
+        let expected_response_size =
+            Command::response_data_len_from_code(cmd_code, self.rom_loader);
 
         loop {
             let response = self.read_packet(timeout.saturating_sub(start_time.elapsed()))?;
@@ -222,7 +221,11 @@ impl Flasher {
             if self.status_size == 0 {
                 // Try to figure out the status size.
                 if expected_response_size == usize::MAX {
-                    bail!("Unknown response size for command {} ({:02X})", Command::name_from_code(cmd), cmd);
+                    bail!(
+                        "Unknown response size for command {} ({:02X})",
+                        Command::name_from_code(cmd),
+                        cmd
+                    );
                 }
                 let size = from_le16(&response[2..4]) as usize;
                 let status_size = size.saturating_sub(expected_response_size);
@@ -257,11 +260,11 @@ impl Flasher {
             if self.buffer.is_empty() {
                 let remaining = max(
                     DEFAULT_SERIAL_TIMEOUT,
-                    timeout.saturating_sub(read_start.elapsed())
+                    timeout.saturating_sub(read_start.elapsed()),
                 );
                 self.fill_buffer(remaining)?;
             }
-    
+
             if let Some(idx) = self.buffer.iter().position(|&x| x == b'\n') {
                 line.extend(self.buffer.drain(..idx + 1));
                 self.trace(Event::SerialLine(Cow::from(&line)));
