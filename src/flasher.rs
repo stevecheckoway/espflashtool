@@ -4,7 +4,7 @@ use std::io::{self, Cursor};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serialport::SerialPort;
 
 use crate::command::{Command, CommandError};
@@ -25,6 +25,15 @@ fn from_le16(data: &[u8]) -> u16 {
 fn from_le32(data: &[u8]) -> u32 {
     let data: [u8; 4] = [data[0], data[1], data[2], data[3]];
     u32::from_le_bytes(data)
+}
+
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum FlasherError {
+    #[error("Unknown ESP device ({:08X})", .0)]
+    UnknownDevice(u32),
+
+    #[error("Command cannot be sent without setting or detecting chip first")]
+    MustSetChipFirst
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,6 +101,10 @@ impl Flasher {
         self.owned_observers.push(observer);
     }
 
+    pub fn chip(&self) -> Option<Chip> {
+        self.chip
+    }
+
     pub fn set_chip(&mut self, chip: Chip) {
         self.chip = Some(chip);
         if !self.rom_loader || chip == Chip::Esp8266 {
@@ -121,11 +134,7 @@ impl Flasher {
 
         loop {
             if self.buffer.is_empty() {
-                let remaining = max(
-                    DEFAULT_SERIAL_TIMEOUT,
-                    timeout.saturating_sub(start_time.elapsed()),
-                );
-                self.fill_buffer(remaining)?;
+                self.fill_buffer(timeout.saturating_sub(start_time.elapsed()))?;
             }
 
             let mut cursor = Cursor::new(&self.buffer);
@@ -172,6 +181,11 @@ impl Flasher {
             }
             Command::ReadReg { address } => {
                 data.extend(address.to_le_bytes());
+            }
+            Command::ChangeBaudRate { new_rate } => {
+                let old_rate = if self.rom_loader { 0 } else { self.serial.baud_rate()? };
+                data.extend(new_rate.to_le_bytes());
+                data.extend(old_rate.to_le_bytes());
             }
             _ => unimplemented!(),
         }
@@ -221,11 +235,7 @@ impl Flasher {
             if self.status_size == 0 {
                 // Try to figure out the status size.
                 if expected_response_size == usize::MAX {
-                    bail!(
-                        "Unknown response size for command {} ({:02X})",
-                        Command::name_from_code(cmd),
-                        cmd
-                    );
+                    return Err(FlasherError::MustSetChipFirst.into());
                 }
                 let size = from_le16(&response[2..4]) as usize;
                 let status_size = size.saturating_sub(expected_response_size);
@@ -258,11 +268,7 @@ impl Flasher {
 
         loop {
             if self.buffer.is_empty() {
-                let remaining = max(
-                    DEFAULT_SERIAL_TIMEOUT,
-                    timeout.saturating_sub(read_start.elapsed()),
-                );
-                self.fill_buffer(remaining)?;
+                self.fill_buffer(timeout.saturating_sub(read_start.elapsed()))?;
             }
 
             if let Some(idx) = self.buffer.iter().position(|&x| x == b'\n') {
@@ -271,13 +277,12 @@ impl Flasher {
                 return Ok(line);
             }
             line.append(&mut self.buffer);
-            self.fill_buffer(timeout)?;
         }
     }
 
     fn fill_buffer(&mut self, timeout: Duration) -> Result<()> {
         self.buffer.resize(1024, 0);
-        self.serial.set_timeout(timeout)?;
+        self.serial.set_timeout(max(DEFAULT_SERIAL_TIMEOUT, timeout))?;
         match self.serial.read(&mut self.buffer) {
             Ok(n) => {
                 self.buffer.truncate(n);
@@ -370,18 +375,14 @@ impl Flasher {
         let cmd = Command::Sync;
         let cmd_code = cmd.code();
         let timeout = cmd.timeout();
-        self.send_command(cmd)?;
+        self.send_command(cmd)
+            .context("Timed out waiting for response to Sync command")?;
 
         for _ in 0..100 {
             match self.read_response(cmd_code, timeout) {
                 Ok(_) => (),
-                Err(err) => {
-                    if let Some(err) = err.downcast_ref::<io::Error>() {
-                        if err.kind() == io::ErrorKind::TimedOut {
-                            return Ok(());
-                        }
-                    }
-                }
+                Err(err) if err.is_timeout() => return Ok(()),
+                Err(err) => return Err(err),
             }
         }
 
@@ -393,12 +394,23 @@ impl Flasher {
             .map(|(value, _data)| value)
     }
 
+    pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {
+        self.send_command(Command::ChangeBaudRate { new_rate })?;
+        self.buffer.clear();
+        self.serial.set_baud_rate(new_rate)?;
+        while self.serial.bytes_to_read()? > 0 {
+            self.serial.clear(serialport::ClearBuffer::All)?;
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
     pub fn detect_chip(&mut self) -> Result<Chip> {
         let magic = self.read_reg(CHIP_MAGIC_REG)?;
         if let Some(chip) = Chip::try_from_magic(magic) {
             self.set_chip(chip);
             return Ok(chip);
         }
-        bail!("Unknown ESP chip {:08X}", magic);
+        Err(FlasherError::UnknownDevice(magic).into())
     }
 }

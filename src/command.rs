@@ -26,7 +26,9 @@ pub enum Command {
     // Commands supported by the ESP32 bootloader.
     SpiSetParams,
     SpiAttach,
-    ChangeBaudRate,
+    ChangeBaudRate {
+        new_rate: u32,
+    },
     FlashDeflBegin,
     FlashDeflData,
     FlashDeflEnd,
@@ -96,7 +98,7 @@ impl Command {
             Command::ReadReg { .. } => 0x0A,
             Command::SpiSetParams => 0x0B,
             Command::SpiAttach => 0x0D,
-            Command::ChangeBaudRate => 0x0F,
+            Command::ChangeBaudRate { .. } => 0x0F,
             Command::FlashDeflBegin => 0x10,
             Command::FlashDeflData => 0x11,
             Command::FlashDeflEnd => 0x12,
