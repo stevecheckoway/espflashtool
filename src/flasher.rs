@@ -22,9 +22,28 @@ fn from_le16(data: &[u8]) -> u16 {
 }
 
 #[inline]
+fn from_le24(data: &[u8]) -> u32 {
+    let data: [u8; 4] = [data[0], data[1], data[2], 0];
+    u32::from_le_bytes(data)
+}
+
+#[inline]
 fn from_le32(data: &[u8]) -> u32 {
     let data: [u8; 4] = [data[0], data[1], data[2], data[3]];
     u32::from_le_bytes(data)
+}
+
+#[inline]
+fn from_le(data: &[u8]) -> u32 {
+    assert!(data.len() <= 4);
+    let mut le_data = [0u8; 4];
+    (&mut le_data[..data.len()]).copy_from_slice(data);
+    u32::from_le_bytes(le_data)
+}
+
+#[inline]
+fn from_be16(data: &[u8]) -> u16 {
+    u16::from_be_bytes([data[0], data[1]])
 }
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
@@ -33,7 +52,24 @@ pub enum FlasherError {
     UnknownDevice(u32),
 
     #[error("Command cannot be sent without setting or detecting chip first")]
-    MustSetChipFirst
+    MustSetChipFirst,
+
+    #[error("SPI commands cannot be sent without attaching first")]
+    MustSpiAttachFirst,
+
+    #[error("Invalid SPI command or address length")]
+    InvalidSpiCommand,
+}
+
+struct SpiRegs {
+    cmd: u32,
+    addr: u32,
+    user: u32,
+    user1: u32,
+    user2: u32,
+    mosi_dlen: u32,
+    miso_dlen: u32,
+    w0: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,6 +93,53 @@ impl Chip {
             _ => None,
         }
     }
+
+    fn spi_base(self) -> u32 {
+        match self {
+            Chip::Esp8266 => todo!(),
+            Chip::Esp32 => 0x3FF42000,
+            Chip::Esp32S2 => todo!(),
+            Chip::Esp32S3 => todo!(),
+            Chip::Esp32C3 => todo!(),
+        }
+    }
+
+    fn spi_regs(self) -> SpiRegs {
+        match self {
+            Chip::Esp8266 => SpiRegs {
+                cmd: 0x60000100,
+                addr: 0x60000104,
+                user: 0x6000011C,
+                user1: 0x60000120,
+                user2: 0x60000124,
+                mosi_dlen: 0,
+                miso_dlen: 0,
+                w0: 0x60000140,
+            },
+            Chip::Esp32 => SpiRegs {
+                cmd: 0x3FF42000,
+                addr: 0x3FF42004,
+                user: 0x3FF4201C,
+                user1: 0x3FF42020,
+                user2: 0x3FF42024,
+                mosi_dlen: 0x3FF42028,
+                miso_dlen: 0x3FF4202C,
+                w0: 0x3FF42080,
+            },
+            Chip::Esp32S2 => SpiRegs {
+                cmd: 0x3F402000,
+                addr: 0x3F402004,
+                user: 0x3F402018,
+                user1: 0x3F40201C,
+                user2: 0x3F402020,
+                mosi_dlen: 0x3F402024,
+                miso_dlen: 0x3F402028,
+                w0: 0x3F402098,
+            },
+            Chip::Esp32S3 => todo!(),
+            Chip::Esp32C3 => todo!(),
+        }
+    }
 }
 
 pub struct Flasher {
@@ -67,6 +150,7 @@ pub struct Flasher {
     observers: Vec<Weak<dyn EventObserver>>,
     owned_observers: Vec<Rc<dyn EventObserver>>,
     chip: Option<Chip>,
+    attached: bool,
 }
 
 impl Flasher {
@@ -82,6 +166,7 @@ impl Flasher {
             observers: Vec::new(),
             owned_observers: Vec::new(),
             chip: None,
+            attached: false,
         })
     }
 
@@ -101,8 +186,8 @@ impl Flasher {
         self.owned_observers.push(observer);
     }
 
-    pub fn chip(&self) -> Option<Chip> {
-        self.chip
+    pub fn chip(&self) -> Result<Chip> {
+        self.chip.ok_or(FlasherError::MustSetChipFirst.into())
     }
 
     pub fn set_chip(&mut self, chip: Chip) {
@@ -179,11 +264,40 @@ impl Flasher {
                 data.extend(&[0x07, 0x07, 0x12, 0x20]);
                 data.resize(data.len() + 32, 0x55);
             }
+            Command::WriteReg {
+                address,
+                value,
+                mask,
+                delay,
+            } => {
+                data.extend(address.to_le_bytes());
+                data.extend(value.to_le_bytes());
+                data.extend(mask.to_le_bytes());
+                data.extend(delay.to_le_bytes());
+            }
             Command::ReadReg { address } => {
                 data.extend(address.to_le_bytes());
             }
+            Command::SpiSetParams { size } => {
+                data.extend(0u32.to_le_bytes()); // id
+                data.extend(size.to_le_bytes()); // total size
+                data.extend(0x10000u32.to_le_bytes()); // block size
+                data.extend(0x1000u32.to_le_bytes()); // sector size
+                data.extend(0x100u32.to_le_bytes()); // page size
+                data.extend(0xFFFFu32.to_le_bytes()); // status mask
+            }
+            Command::SpiAttach { pins } => {
+                data.extend(pins.to_le_bytes());
+                if self.rom_loader {
+                    data.extend(&[0, 0, 0, 0]);
+                }
+            }
             Command::ChangeBaudRate { new_rate } => {
-                let old_rate = if self.rom_loader { 0 } else { self.serial.baud_rate()? };
+                let old_rate = if self.rom_loader {
+                    0
+                } else {
+                    self.serial.baud_rate()?
+                };
                 data.extend(new_rate.to_le_bytes());
                 data.extend(old_rate.to_le_bytes());
             }
@@ -198,7 +312,11 @@ impl Flasher {
         let timeout = cmd.timeout();
         self.trace(Event::Command(cmd));
         self.send_packet(&data)?;
-        self.read_response(cmd_code, timeout)
+        let response = self.read_response(cmd_code, timeout);
+        if response.is_timeout() {
+            self.trace(Event::CommandTimeout(cmd_code));
+        }
+        response
     }
 
     // Read a response packet corresponding to the command with code `cmd_code`.
@@ -282,7 +400,8 @@ impl Flasher {
 
     fn fill_buffer(&mut self, timeout: Duration) -> Result<()> {
         self.buffer.resize(1024, 0);
-        self.serial.set_timeout(max(DEFAULT_SERIAL_TIMEOUT, timeout))?;
+        self.serial
+            .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, timeout))?;
         match self.serial.read(&mut self.buffer) {
             Ok(n) => {
                 self.buffer.truncate(n);
@@ -319,19 +438,17 @@ impl Flasher {
 
     pub fn connect(&mut self) -> Result<()> {
         let timeout = Duration::from_millis(100);
-        self.reset(true)?;
-        // Look for boot message.
         let mut waiting = false;
-        for _ in 0..10 {
-            let line = self.read_line(timeout);
-            if line.is_timeout() {
-                // XXX: Does the ESP8266 write this message but just at a different baud rate?
-                waiting = true;
-                break;
-            }
-            if line? == b"waiting for download\r\n" {
-                waiting = true;
-                break;
+        'outer: for _ in 0..10 {
+            self.reset(true)?;
+            // Look for boot message.
+            for _ in 0..10 {
+                let line = self.read_line(timeout);
+                if line.is_timeout() || line? == b"waiting for download\r\n" {
+                    // XXX: Does the ESP8266 write this message but just at a different baud rate?
+                    waiting = true;
+                    break 'outer;
+                }
             }
         }
         if !waiting {
@@ -353,21 +470,155 @@ impl Flasher {
         Ok(())
     }
 
+    pub fn attach(&mut self) -> Result<()> {
+        if self.chip()? == Chip::Esp8266 {
+            self.flash_begin(0, 0, 0, 0)
+        } else {
+            self.spi_attach()
+        }
+    }
+
+    pub fn flash_id(&mut self) -> Result<(u8, u16)> {
+        let mut output = [0u8; 3];
+        self.spi_command(0x9F, 1, 0, 1, 0, &[], &mut output)?;
+        Ok((output[2], from_be16(&output[0..2])))
+    }
+
+    pub fn sfdp_read(&mut self, address: u32, output: &mut [u8]) -> Result<()> {
+        self.spi_command(0x5A, 1, address, 3, 8, &[], output)
+    }
+
+    pub fn spi_command(
+        &mut self,
+        command: u16,
+        command_len: u32,
+        address: u32,
+        address_len: u32,
+        dummy_cycles: u32,
+        data: &[u8],
+        output: &mut [u8],
+    ) -> Result<()> {
+        if !matches!(command_len, 1 | 2) || !matches!(address_len, 0..=4) || !matches!(dummy_cycles, 0..=255) || data.len() > 64 || output.len() > 64 {
+            return Err(FlasherError::InvalidSpiCommand.into());
+        }
+        let chip = self.chip()?;
+        if !self.attached {
+            self.spi_attach()
+                .context("Failed to attach to the SPI flash")?;
+        }
+        const SPI_CMD_REG: u32 = 0;
+        const SPI_ADDR_REG: u32 = 4;
+        const SPI_USER_REG: u32 = 0x1C;
+        const SPI_USER1_REG: u32 = 0x20;
+        const SPI_USER2_REG: u32 = 0x24;
+        const SPI_MOSI_DLEN_REG: u32 = 0x28;
+        const SPI_MISO_DLEN_REG: u32 = 0x2C;
+        const SPI_W0_REG: u32 = 0x80;
+
+        // SPI_CMD_REG
+        const SPI_USR: u32 = 1 << 18;
+
+        // SPI_USER_REG
+        const SPI_USR_COMMAND: u32 = 1 << 31;
+        const SPI_USR_ADDR: u32 = 1 << 30;
+        const SPI_USR_DUMMY: u32 = 1 << 29;
+        const SPI_USR_MISO: u32 = 1 << 28;
+        const SPI_USR_MOSI: u32 = 1 << 27;
+        let spi_base = chip.spi_base();
+
+        let mut user_data = SPI_USR_COMMAND;
+        let mut user1_data = 0;
+        let command = if command_len == 1 { command } else { command.to_be() } as u32;
+        let user2_data = (command_len * 8 - 1) << 28 | command;
+        self.write_reg(spi_base + SPI_USER2_REG, user2_data, 0xFFFFFFFF, 0)?;
+
+        if address_len > 0 {
+            user_data |= SPI_USR_ADDR;
+            user1_data |= (address_len * 8 - 1) << 26;
+            let address = match address_len {
+                1 => address,
+                2 => (address as u16).to_be() as u32,
+                3 => ((address & 0xFF0000) >> 16) | (address & 0x00FF00) | ((address & 0x0000FF) << 16),
+                4 => address.to_be(),
+                _ => unreachable!(),
+            };
+            self.write_reg(spi_base + SPI_ADDR_REG, address, 0xFFFFFFFF, 0)?;
+        }
+        if dummy_cycles > 0 {
+            user_data |= SPI_USR_DUMMY;
+            user1_data |= dummy_cycles
+        }
+        if !data.is_empty() {
+            user_data |= SPI_USR_MOSI;
+            let data_len = (data.len() * 8 - 1) as u32;
+            if chip == Chip::Esp8266 {
+                user1_data |= data_len << 17;
+            } else {
+                self.write_reg(spi_base + SPI_MOSI_DLEN_REG, data_len, 0xFFFFFFFF, 0)?;
+            }
+
+            for (pos, val) in data.chunks(4).enumerate() {
+                let reg = spi_base + SPI_W0_REG + (pos as u32) * 4;
+                let val = from_le(val);
+                self.write_reg(reg, val, 0xFFFFFFFF, 0)?;
+            }
+        }
+        if !output.is_empty() {
+            user_data |= SPI_USR_MISO;
+            let output_len = (output.len() * 8 - 1) as u32;
+            if chip == Chip::Esp8266 {
+                user1_data |= output_len << 8;
+            } else {
+                self.write_reg(spi_base + SPI_MISO_DLEN_REG, output_len, 0xFFFFFFFF, 0)?;
+            }
+        }
+        self.write_reg(spi_base + SPI_USER1_REG, user1_data, 0xFFFFFFFF, 0)?;
+        self.write_reg(spi_base + SPI_USER_REG, user_data, 0xFFFFFFFF, 0)?;
+        self.write_reg(spi_base + SPI_CMD_REG, SPI_USR, 0xFFFFFFFF, 0)?;
+
+        loop {
+            let cmd = self.read_reg(spi_base + SPI_CMD_REG)?;
+            if cmd & SPI_USR == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        // Read output.
+        for (pos, output_val) in output.chunks_mut(4).enumerate() {
+            let reg = spi_base + SPI_W0_REG + (pos as u32) * 4;
+            let val = self.read_reg(reg)?.to_le_bytes();
+            output_val.copy_from_slice(&val[..output_val.len()]);
+        }
+        Ok(())
+    }
+
     pub fn reset(&mut self, enter_bootloader: bool) -> Result<()> {
+        self.trace(Event::Reset);
+        self.buffer.clear();
+
         // /RTS is connected to EN
         // /DTR is connected to GPIO0
         self.serial.write_request_to_send(true)?;
         self.serial.write_data_terminal_ready(false)?;
         std::thread::sleep(Duration::from_millis(100));
+        self.serial.clear(serialport::ClearBuffer::All)?;
 
         self.serial.write_data_terminal_ready(enter_bootloader)?;
         self.serial.write_request_to_send(false)?;
         std::thread::sleep(Duration::from_millis(500));
         self.serial.write_data_terminal_ready(false)?;
 
-        self.trace(Event::Reset);
-        self.buffer.clear();
-        self.serial.flush()?;
+        Ok(())
+    }
+
+    pub fn flash_begin(&mut self, total_size: u32, num_packets: u32, packet_size: u32, flash_offset: u32) -> Result<()> {
+        self.send_command(Command::FlashBegin {
+            total_size,
+            num_packets,
+            packet_size,
+            flash_offset,
+        })?;
         Ok(())
     }
 
@@ -389,9 +640,30 @@ impl Flasher {
         Ok(())
     }
 
+    pub fn write_reg(&mut self, address: u32, value: u32, mask: u32, delay: u32) -> Result<()> {
+        self.send_command(Command::WriteReg {
+            address,
+            value,
+            mask,
+            delay,
+        })?;
+        Ok(())
+    }
+
     pub fn read_reg(&mut self, address: u32) -> Result<u32> {
         self.send_command(Command::ReadReg { address })
             .map(|(value, _data)| value)
+    }
+
+    pub fn spi_set_params(&mut self, size: u32) -> Result<()> {
+        self.send_command(Command::SpiSetParams { size })?;
+        Ok(())
+    }
+
+    pub fn spi_attach(&mut self) -> Result<()> {
+        self.send_command(Command::SpiAttach { pins: 0 })?;
+        self.attached = true;
+        Ok(())
     }
 
     pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {

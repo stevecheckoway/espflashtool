@@ -12,15 +12,26 @@ fn arguments() -> ArgMatches {
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .arg(arg!(-p --port <PORT> "Path to serial port")
             .required(false)
+            .require_equals(true)
             .global(true))
-        .arg(arg!(-t --trace "Trace serial communication")
+        .arg(arg!(-t --trace [PROTOCOL] ... "Trace serial communication")
+            .default_missing_value("all")
+            .use_delimiter(true)
+            .multiple_values(true)
+            .min_values(0)
+            .max_values(1000)
+            .require_delimiter(true)
+            .require_equals(true)
+            .possible_values(["all", "serial", "line", "slip", "command"])
             .required(false)
             .global(true))
         .arg(arg!(-b --baud <BAUD> "Set the serial port speed after connecting")
             .required(false)
+            .require_equals(true)
             .global(true))
         .subcommand(App::new("detect-chip").about("Detects the type of the ESP chip"))
         .subcommand(App::new("list-ports").about("List serial ports"))
+        .subcommand(App::new("flash-id").about("Print the flash ID"))
         .get_matches()
 }
 
@@ -30,7 +41,34 @@ fn open_connection(args: &ArgMatches) -> Result<Flasher> {
         .unwrap_or("/dev/tty.SLAB_USBtoUART");
         let mut flasher = Flasher::new(port)?;
         if args.is_present("trace") {
-            flasher.add_owned_observer(EventTracer::new(std::io::stderr(), |_| true));
+            let mut serial = false;
+            let mut line = false;
+            let mut slip = false;
+            let mut command = false;
+            for trace_arg in args.values_of("trace").unwrap() {
+                match trace_arg {
+                    "all" => {
+                        serial = true;
+                        line = true;
+                        slip = true;
+                        command = true;
+                    }
+                    "serial" => serial = true,
+                    "line" => line = true,
+                    "slip" => slip = true,
+                    "command" => command = true,
+                    _ => unreachable!(),
+                }
+            }
+            flasher.add_owned_observer(EventTracer::new(std::io::stderr(), move |event| {
+                use espflashtool::event::Event::*;
+                match event {
+                    Reset | Command(..) | CommandTimeout(..) | Response(..) | InvalidResponse(..) => command,
+                    SerialRead(..) | SerialWrite(..) => serial,
+                    SerialLine(..) => line,
+                    SlipRead(..) | SlipWrite(..) => slip,
+                }
+            }));
         }
         flasher.connect()?;
         flasher.detect_chip()?;
@@ -48,13 +86,20 @@ fn main() -> Result<()> {
     match subcmd {
         "detect-chip" => {
             let mut flasher = open_connection(&args)?;
-            flasher.sync()?;
             println!("{:?}", flasher.chip().unwrap());
             flasher.reset(false)?;
         }
         "list-ports" => {
             let ports = serialport::available_ports().context("Failed to detect serial ports")?;
             println!("{:#?}", ports);
+        }
+        "flash-id" => {
+            let mut flasher = open_connection(&args)?;
+            flasher.attach()?;
+            let (mid, did) = flasher.flash_id()?;
+            println!("{:02X} {:02X}", mid, did);
+            flasher.reset(false)?;
+
         }
         _ => unreachable!(),
     }

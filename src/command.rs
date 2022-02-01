@@ -18,14 +18,23 @@ pub enum Command {
     MemEnd,
     MemData,
     Sync,
-    WriteReg,
+    WriteReg {
+        address: u32,
+        value: u32,
+        mask: u32,
+        delay: u32,
+    },
     ReadReg {
         address: u32,
     },
 
     // Commands supported by the ESP32 bootloader.
-    SpiSetParams,
-    SpiAttach,
+    SpiSetParams {
+        size: u32,
+    },
+    SpiAttach {
+        pins: u32,
+    },
     ChangeBaudRate {
         new_rate: u32,
     },
@@ -85,6 +94,20 @@ impl Command {
         }
     }
 
+    pub fn spi_attach(hd_pin: u32, q_pin: u32, d_pin: u32, cs_pin: u32, clk_pin: u32) -> Command {
+        let f = |pin: u32| {
+            match pin {
+                0..=30 => pin,
+                32 => 30,
+                33 => 31,
+                _ => panic!("Invalid pin assignment: {}", pin),
+            }
+        };
+        Command::SpiAttach {
+            pins: (f(hd_pin) << 24) | (f(q_pin) << 18) | (f(d_pin) << 12) | (f(cs_pin) << 6) | f(clk_pin),
+        }
+    }
+
     pub fn code(&self) -> u8 {
         match self {
             Command::FlashBegin { .. } => 0x02,
@@ -94,10 +117,10 @@ impl Command {
             Command::MemEnd => 0x06,
             Command::MemData => 0x07,
             Command::Sync => 0x08,
-            Command::WriteReg => 0x09,
+            Command::WriteReg { .. } => 0x09,
             Command::ReadReg { .. } => 0x0A,
-            Command::SpiSetParams => 0x0B,
-            Command::SpiAttach => 0x0D,
+            Command::SpiSetParams { .. } => 0x0B,
+            Command::SpiAttach { .. } => 0x0D,
             Command::ChangeBaudRate { .. } => 0x0F,
             Command::FlashDeflBegin => 0x10,
             Command::FlashDeflData => 0x11,

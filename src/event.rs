@@ -17,6 +17,7 @@ pub enum Event<'a> {
     SlipRead(Cow<'a, [u8]>),
     SlipWrite(Cow<'a, [u8]>),
     Command(Command),
+    CommandTimeout(u8),
     // Command, status, error, value, data
     Response(u8, u8, u8, u32, Cow<'a, [u8]>),
     InvalidResponse(Cow<'a, [u8]>),
@@ -33,6 +34,7 @@ impl<'a> Event<'a> {
             SlipRead(data) => SlipRead(Cow::Owned(data.into_owned())),
             SlipWrite(data) => SlipWrite(Cow::Owned(data.into_owned())),
             Command(cmd) => Command(cmd),
+            CommandTimeout(cmd) => CommandTimeout(cmd),
             Response(cmd, status, err, value, data) => {
                 Response(cmd, status, err, value, Cow::Owned(data.into_owned()))
             }
@@ -109,7 +111,11 @@ impl<'a> std::fmt::Display for Event<'a> {
                 format_data(f, data)
             }
             Event::Command(cmd) => {
-                write!(f, "Command cmd={:?} ({:02X})", cmd, cmd.code())
+                write!(f, "Command cmd={:X?} ({:02X})", cmd, cmd.code())
+            }
+            Event::CommandTimeout(cmd_code) => {
+                let cmd = Command::name_from_code(*cmd_code);
+                write!(f, "Command timeout cmd={cmd} ({cmd_code:02X})", cmd = cmd, cmd_code = cmd_code)
             }
             Event::Response(cmd_code, status, err_code, value, data) => {
                 let cmd = Command::name_from_code(*cmd_code);
