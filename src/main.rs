@@ -91,13 +91,13 @@ fn main() -> Result<()> {
         }
         "list-ports" => {
             let ports = serialport::available_ports().context("Failed to detect serial ports")?;
-            println!("{:#?}", ports);
+            println!("{ports:#?}");
         }
         "flash-id" => {
             let mut flasher = open_connection(&args)?;
             flasher.attach()?;
             let (mid, did) = flasher.flash_id()?;
-            println!("{:02X} {:02X}", mid, did);
+            println!("{mid:02X} {did:02X}");
             flasher.reset(false)?;
 
         }

@@ -96,7 +96,7 @@ impl<'a> std::fmt::Display for Event<'a> {
             }
             Event::SerialLine(data) => {
                 if let Ok(line) = std::str::from_utf8(&data[..data.len() - 2]) {
-                    write!(f, "Read line: {}", line)
+                    write!(f, "Read line: {line}")
                 } else {
                     writeln!(f, "Read line:")?;
                     format_data(f, data)
@@ -115,26 +115,19 @@ impl<'a> std::fmt::Display for Event<'a> {
             }
             Event::CommandTimeout(cmd_code) => {
                 let cmd = Command::name_from_code(*cmd_code);
-                write!(f, "Command timeout cmd={cmd} ({cmd_code:02X})", cmd = cmd, cmd_code = cmd_code)
+                write!(f, "Command timeout cmd={cmd} ({cmd_code:02X})")
             }
             Event::Response(cmd_code, status, err_code, value, data) => {
                 let cmd = Command::name_from_code(*cmd_code);
                 write!(
                     f,
                     "Response cmd={cmd} ({cmd_code:02X}) status={status:02X} ",
-                    cmd = cmd,
-                    cmd_code = cmd_code,
-                    status = status
                 )?;
                 if *status != 0 {
-                    write!(
-                        f,
-                        "err={} ({:02X}) ",
-                        CommandError::from(*err_code),
-                        err_code
-                    )?;
+                    let err = CommandError::from(*err_code);
+                    write!(f, "err={err} ({err_code:02X}) ",)?;
                 }
-                write!(f, "value={:08X}", value)?;
+                write!(f, "value={value:08X}")?;
                 if !data.is_empty() {
                     writeln!(f, " data:")?;
                     format_data(f, data)?;
@@ -240,8 +233,9 @@ where
 {
     fn notify<'a>(&self, timestamp: Instant, event: &Event<'a>) {
         if (self.filter)(event) {
-            let delta = timestamp - self.last.replace(Some(timestamp)).unwrap_or(timestamp);
-            println!("TRACE +{:.3} {:}", delta.as_secs_f32(), event);
+            let delta =
+                (timestamp - self.last.replace(Some(timestamp)).unwrap_or(timestamp)).as_secs_f32();
+            println!("TRACE +{delta:.3} {event}");
         }
     }
 }

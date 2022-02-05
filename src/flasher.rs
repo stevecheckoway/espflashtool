@@ -480,12 +480,8 @@ impl Flasher {
 
     pub fn flash_id(&mut self) -> Result<(u8, u16)> {
         let mut output = [0u8; 3];
-        self.spi_command(0x9F, 1, 0, 1, 0, &[], &mut output)?;
-        Ok((output[2], from_be16(&output[0..2])))
-    }
-
-    pub fn sfdp_read(&mut self, address: u32, output: &mut [u8]) -> Result<()> {
-        self.spi_command(0x5A, 1, address, 3, 8, &[], output)
+        self.spi_command(0x9F, 1, 0, 0, 0, &[], &mut output)?;
+        Ok((output[0], from_be16(&output[1..3])))
     }
 
     pub fn spi_command(
@@ -546,7 +542,7 @@ impl Flasher {
         }
         if dummy_cycles > 0 {
             user_data |= SPI_USR_DUMMY;
-            user1_data |= dummy_cycles
+            user1_data |= dummy_cycles - 1;
         }
         if !data.is_empty() {
             user_data |= SPI_USR_MOSI;
