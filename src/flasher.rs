@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serialport::SerialPort;
 
-use crate::chip::{Chip};
+use crate::chip::Chip;
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
 use crate::timeout::ErrorExt;
@@ -107,7 +107,8 @@ impl Flasher {
     }
 
     pub fn chip(&self) -> Result<Chip> {
-        self.chip.ok_or_else(|| FlasherError::MustSetChipFirst.into())
+        self.chip
+            .ok_or_else(|| FlasherError::MustSetChipFirst.into())
     }
 
     pub fn set_chip(&mut self, chip: Chip) {
@@ -162,9 +163,19 @@ impl Flasher {
         }
     }
 
+    #[inline]
     fn send_command(&mut self, cmd: Command) -> Result<(u32, Vec<u8>)> {
-        let mut data: Vec<u8> = Vec::with_capacity(64);
-        let checksum: u8 = 0;
+        self.send_command_with_data(cmd, &[])
+    }
+
+    fn send_command_with_data(&mut self, cmd: Command, data: &[u8]) -> Result<(u32, Vec<u8>)> {
+        let add_words = |v: &mut Vec<u8>, words: &[u32]| {
+            for word in words {
+                v.extend(word.to_le_bytes());
+            }
+        };
+        let mut slip_data: Vec<u8> = Vec::with_capacity(64);
+        let mut checksum: u8 = 0;
         let cmd_code = cmd.code();
 
         /*
@@ -177,12 +188,56 @@ impl Flasher {
          *
          * Followed by data.
          */
-        data.extend(&[0, cmd_code, 0, 0, 0, 0, 0, 0]);
+        slip_data.extend(&[0, cmd_code, 0, 0, 0, 0, 0, 0]);
 
         match cmd {
+            Command::FlashBegin {
+                total_size,
+                num_packets,
+                packet_size,
+                flash_offset,
+            }
+            | Command::MemBegin {
+                total_size,
+                num_packets,
+                packet_size,
+                flash_offset,
+            }
+            | Command::FlashDeflBegin {
+                total_size,
+                num_packets,
+                packet_size,
+                flash_offset,
+            } => {
+                add_words(
+                    &mut slip_data,
+                    &[total_size, num_packets, packet_size, flash_offset],
+                );
+            }
+            Command::FlashData { sequence_num }
+            | Command::MemData { sequence_num }
+            | Command::FlashDeflData { sequence_num } => {
+                add_words(&mut slip_data, &[data.len() as u32, sequence_num, 0, 0]);
+                checksum = 0xEFu8;
+                for x in data {
+                    checksum ^= *x;
+                }
+                slip_data.extend(data);
+            }
+            Command::FlashEnd { reboot } | Command::FlashDeflEnd { reboot } => {
+                let reboot_or_run_user_code = if reboot { 0 } else { 1 };
+                add_words(&mut slip_data, &[reboot_or_run_user_code])
+            }
+            Command::MemEnd {
+                execute,
+                entry_point,
+            } => {
+                let val = if execute { 0 } else { 1 };
+                add_words(&mut slip_data, &[val, entry_point]);
+            }
             Command::Sync => {
-                data.extend(&[0x07, 0x07, 0x12, 0x20]);
-                data.resize(data.len() + 32, 0x55);
+                slip_data.extend(&[0x07, 0x07, 0x12, 0x20]);
+                slip_data.resize(slip_data.len() + 32, 0x55);
             }
             Command::WriteReg {
                 address,
@@ -190,26 +245,20 @@ impl Flasher {
                 mask,
                 delay,
             } => {
-                data.extend(address.to_le_bytes());
-                data.extend(value.to_le_bytes());
-                data.extend(mask.to_le_bytes());
-                data.extend(delay.to_le_bytes());
+                add_words(&mut slip_data, &[address, value, mask, delay]);
             }
             Command::ReadReg { address } => {
-                data.extend(address.to_le_bytes());
+                add_words(&mut slip_data, &[address]);
             }
             Command::SpiSetParams { size } => {
-                data.extend(0u32.to_le_bytes()); // id
-                data.extend(size.to_le_bytes()); // total size
-                data.extend(0x10000u32.to_le_bytes()); // block size
-                data.extend(0x1000u32.to_le_bytes()); // sector size
-                data.extend(0x100u32.to_le_bytes()); // page size
-                data.extend(0xFFFFu32.to_le_bytes()); // status mask
+                // id, total size, block size, sector size, page size, status mask
+                add_words(&mut slip_data, &[0, size, 0x10000, 0x1000, 0x100, 0xFFFF]);
             }
             Command::SpiAttach { pins } => {
-                data.extend(pins.to_le_bytes());
                 if self.rom_loader {
-                    data.extend(&[0, 0, 0, 0]);
+                    add_words(&mut slip_data, &[pins, 0]);
+                } else {
+                    add_words(&mut slip_data, &[pins]);
                 }
             }
             Command::ChangeBaudRate { new_rate } => {
@@ -218,20 +267,37 @@ impl Flasher {
                 } else {
                     self.serial.baud_rate()?
                 };
-                data.extend(new_rate.to_le_bytes());
-                data.extend(old_rate.to_le_bytes());
+                add_words(&mut slip_data, &[new_rate, old_rate]);
             }
-            _ => unimplemented!(),
+            Command::SpiFlashMD5 { address, size } => {
+                add_words(&mut slip_data, &[address, size, 0, 0]);
+            }
+            Command::EraseFlash => {}
+            Command::EraseRegion { offset, size } => {
+                add_words(&mut slip_data, &[offset, size]);
+            }
+            Command::ReadFlash {
+                offset,
+                read_length,
+                packet_size,
+                max_pending_packets,
+            } => {
+                add_words(
+                    &mut slip_data,
+                    &[offset, read_length, packet_size, max_pending_packets],
+                );
+            }
+            Command::RunUserCode => {}
         }
 
-        let len: u16 = (data.len() - 8).try_into()?;
-        data[2] = len as u8;
-        data[3] = (len >> 8) as u8;
-        data[4] = checksum;
+        let len: u16 = (slip_data.len() - 8).try_into()?;
+        slip_data[2] = len as u8;
+        slip_data[3] = (len >> 8) as u8;
+        slip_data[4] = checksum;
 
         let timeout = cmd.timeout();
-        self.trace(Event::Command(cmd));
-        self.send_packet(&data)?;
+        self.trace(Event::Command(cmd, Cow::Borrowed(data)));
+        self.send_packet(&slip_data)?;
         let response = self.read_response(cmd_code, timeout);
         if response.is_timeout() {
             self.trace(Event::CommandTimeout(cmd_code));
@@ -415,7 +481,12 @@ impl Flasher {
         data: &[u8],
         output: &mut [u8],
     ) -> Result<()> {
-        if !matches!(command_len, 1 | 2) || !matches!(address_len, 0..=4) || !matches!(dummy_cycles, 0..=255) || data.len() > 64 || output.len() > 64 {
+        if !matches!(command_len, 1 | 2)
+            || !matches!(address_len, 0..=4)
+            || !matches!(dummy_cycles, 0..=255)
+            || data.len() > 64
+            || output.len() > 64
+        {
             return Err(FlasherError::InvalidSpiCommand.into());
         }
         let chip = self.chip()?;
@@ -437,7 +508,11 @@ impl Flasher {
 
         let mut user_data = SPI_USR_COMMAND;
         let mut user1_data = 0;
-        let command = if command_len == 1 { command } else { command.to_be() } as u32;
+        let command = if command_len == 1 {
+            command
+        } else {
+            command.to_be()
+        } as u32;
         let user2_data = (command_len * 8 - 1) << 28 | command;
         self.write_reg(regs.user2, user2_data, 0xFFFFFFFF, 0)?;
 
@@ -447,7 +522,11 @@ impl Flasher {
             let address = match address_len {
                 1 => address,
                 2 => (address as u16).to_be() as u32,
-                3 => ((address & 0xFF0000) >> 16) | (address & 0x00FF00) | ((address & 0x0000FF) << 16),
+                3 => {
+                    ((address & 0xFF0000) >> 16)
+                        | (address & 0x00FF00)
+                        | ((address & 0x0000FF) << 16)
+                }
                 4 => address.to_be(),
                 _ => unreachable!(),
             };
@@ -519,13 +598,84 @@ impl Flasher {
         Ok(())
     }
 
-    pub fn flash_begin(&mut self, total_size: u32, num_packets: u32, packet_size: u32, flash_offset: u32) -> Result<()> {
+    pub fn flash_begin(
+        &mut self,
+        total_size: u32,
+        num_packets: u32,
+        packet_size: u32,
+        flash_offset: u32,
+    ) -> Result<()> {
         self.send_command(Command::FlashBegin {
             total_size,
             num_packets,
             packet_size,
             flash_offset,
         })?;
+        Ok(())
+    }
+
+    pub fn flash_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
+        self.send_command_with_data(Command::FlashData { sequence_num }, data)?;
+        Ok(())
+    }
+
+    pub fn flash_end(&mut self, reboot: bool) -> Result<()> {
+        self.send_command(Command::FlashEnd { reboot })?;
+        Ok(())
+    }
+
+    pub fn mem_begin(
+        &mut self,
+        total_size: u32,
+        num_packets: u32,
+        packet_size: u32,
+        flash_offset: u32,
+    ) -> Result<()> {
+        self.send_command(Command::MemBegin {
+            total_size,
+            num_packets,
+            packet_size,
+            flash_offset,
+        })?;
+        Ok(())
+    }
+
+    pub fn mem_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
+        self.send_command_with_data(Command::MemData { sequence_num }, data)?;
+        Ok(())
+    }
+
+    pub fn mem_end(&mut self, execute: bool, entry_point: u32) -> Result<()> {
+        self.send_command(Command::MemEnd {
+            execute,
+            entry_point,
+        })?;
+        Ok(())
+    }
+
+    pub fn flash_defl_begin(
+        &mut self,
+        total_size: u32,
+        num_packets: u32,
+        packet_size: u32,
+        flash_offset: u32,
+    ) -> Result<()> {
+        self.send_command(Command::FlashDeflBegin {
+            total_size,
+            num_packets,
+            packet_size,
+            flash_offset,
+        })?;
+        Ok(())
+    }
+
+    pub fn flash_defl_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
+        self.send_command_with_data(Command::FlashDeflData { sequence_num }, data)?;
+        Ok(())
+    }
+
+    pub fn flash_defl_end(&mut self, reboot: bool) -> Result<()> {
+        self.send_command(Command::FlashDeflEnd { reboot })?;
         Ok(())
     }
 
@@ -582,6 +732,33 @@ impl Flasher {
             std::thread::sleep(Duration::from_millis(5));
         }
         Ok(())
+    }
+
+    pub fn spi_flash_md5(&mut self, address: u32, size: u32) -> Result<[u8; 16]> {
+        let (_value, data) = self.send_command(Command::SpiFlashMD5 { address, size })?;
+        let mut result = [0u8; 16];
+        if self.rom_loader {
+            if data.len() != 32 || !data.iter().all(u8::is_ascii_hexdigit) {
+                return Err(CommandError::InvalidResponse.into());
+            }
+            let f = |x: u8| match x {
+                b'0'..=b'9' => x - b'0',
+                b'a'..=b'f' => x - b'a' + 10,
+                b'A'..=b'F' => x - b'A' + 10,
+                _ => unreachable!(),
+            };
+            for idx in 0..16 {
+                result[idx] = 16 * f(data[2 * idx]) + f(data[2 * idx + 1]);
+            }
+        } else {
+            if data.len() != 16 {
+                return Err(CommandError::InvalidResponse.into());
+            }
+            for (idx, byte) in data.iter().enumerate() {
+                result[idx] = *byte;
+            }
+        }
+        Ok(result)
     }
 
     pub fn detect_chip(&mut self) -> Result<Chip> {

@@ -16,7 +16,7 @@ pub enum Event<'a> {
     SerialLine(Cow<'a, [u8]>),
     SlipRead(Cow<'a, [u8]>),
     SlipWrite(Cow<'a, [u8]>),
-    Command(Command),
+    Command(Command, Cow<'a, [u8]>),
     CommandTimeout(u8),
     // Command, status, error, value, data
     Response(u8, u8, u8, u32, Cow<'a, [u8]>),
@@ -33,7 +33,7 @@ impl<'a> Event<'a> {
             SerialLine(data) => SerialLine(Cow::Owned(data.into_owned())),
             SlipRead(data) => SlipRead(Cow::Owned(data.into_owned())),
             SlipWrite(data) => SlipWrite(Cow::Owned(data.into_owned())),
-            Command(cmd) => Command(cmd),
+            Command(cmd, data) => Command(cmd, Cow::Owned(data.into_owned())),
             CommandTimeout(cmd) => CommandTimeout(cmd),
             Response(cmd, status, err, value, data) => {
                 Response(cmd, status, err, value, Cow::Owned(data.into_owned()))
@@ -110,8 +110,12 @@ impl<'a> std::fmt::Display for Event<'a> {
                 writeln!(f, "Write packet:")?;
                 format_data(f, data)
             }
-            Event::Command(cmd) => {
-                write!(f, "Command cmd={:X?} ({:02X})", cmd, cmd.code())
+            Event::Command(cmd, data) => {
+                write!(f, "Command cmd={:X?} ({:02X})", cmd, cmd.code())?;
+                if !data.is_empty() {
+                    format_data(f, data)?;
+                }
+                Ok(())
             }
             Event::CommandTimeout(cmd_code) => {
                 let cmd = Command::name_from_code(*cmd_code);
