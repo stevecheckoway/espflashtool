@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serialport::SerialPort;
 
+use crate::chip::{Chip};
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
 use crate::timeout::ErrorExt;
@@ -61,87 +62,6 @@ pub enum FlasherError {
     InvalidSpiCommand,
 }
 
-struct SpiRegs {
-    cmd: u32,
-    addr: u32,
-    user: u32,
-    user1: u32,
-    user2: u32,
-    mosi_dlen: u32,
-    miso_dlen: u32,
-    w0: u32,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Chip {
-    Esp8266,
-    Esp32,
-    Esp32S2,
-    Esp32S3,
-    Esp32C3,
-}
-
-impl Chip {
-    pub fn try_from_magic(magic: u32) -> Option<Self> {
-        // https://github.com/espressif/esp-serial-flasher/blob/master/src/esp_targets.c
-        match magic {
-            0xFFF0C101 => Some(Chip::Esp8266),
-            0x00F01D83 => Some(Chip::Esp32),
-            0x000007c6 => Some(Chip::Esp32S2),
-            0x6921506F | 0x1B31506F => Some(Chip::Esp32C3),
-            0x00000009 => Some(Chip::Esp32S3),
-            _ => None,
-        }
-    }
-
-    fn spi_base(self) -> u32 {
-        match self {
-            Chip::Esp8266 => todo!(),
-            Chip::Esp32 => 0x3FF42000,
-            Chip::Esp32S2 => todo!(),
-            Chip::Esp32S3 => todo!(),
-            Chip::Esp32C3 => todo!(),
-        }
-    }
-
-    fn spi_regs(self) -> SpiRegs {
-        match self {
-            Chip::Esp8266 => SpiRegs {
-                cmd: 0x60000100,
-                addr: 0x60000104,
-                user: 0x6000011C,
-                user1: 0x60000120,
-                user2: 0x60000124,
-                mosi_dlen: 0,
-                miso_dlen: 0,
-                w0: 0x60000140,
-            },
-            Chip::Esp32 => SpiRegs {
-                cmd: 0x3FF42000,
-                addr: 0x3FF42004,
-                user: 0x3FF4201C,
-                user1: 0x3FF42020,
-                user2: 0x3FF42024,
-                mosi_dlen: 0x3FF42028,
-                miso_dlen: 0x3FF4202C,
-                w0: 0x3FF42080,
-            },
-            Chip::Esp32S2 => SpiRegs {
-                cmd: 0x3F402000,
-                addr: 0x3F402004,
-                user: 0x3F402018,
-                user1: 0x3F40201C,
-                user2: 0x3F402020,
-                mosi_dlen: 0x3F402024,
-                miso_dlen: 0x3F402028,
-                w0: 0x3F402098,
-            },
-            Chip::Esp32S3 => todo!(),
-            Chip::Esp32C3 => todo!(),
-        }
-    }
-}
-
 pub struct Flasher {
     serial: Box<dyn SerialPort>,
     buffer: Vec<u8>,
@@ -187,7 +107,7 @@ impl Flasher {
     }
 
     pub fn chip(&self) -> Result<Chip> {
-        self.chip.ok_or(FlasherError::MustSetChipFirst.into())
+        self.chip.ok_or_else(|| FlasherError::MustSetChipFirst.into())
     }
 
     pub fn set_chip(&mut self, chip: Chip) {
@@ -484,6 +404,7 @@ impl Flasher {
         Ok((output[0], from_be16(&output[1..3])))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spi_command(
         &mut self,
         command: u16,
@@ -502,14 +423,6 @@ impl Flasher {
             self.spi_attach()
                 .context("Failed to attach to the SPI flash")?;
         }
-        const SPI_CMD_REG: u32 = 0;
-        const SPI_ADDR_REG: u32 = 4;
-        const SPI_USER_REG: u32 = 0x1C;
-        const SPI_USER1_REG: u32 = 0x20;
-        const SPI_USER2_REG: u32 = 0x24;
-        const SPI_MOSI_DLEN_REG: u32 = 0x28;
-        const SPI_MISO_DLEN_REG: u32 = 0x2C;
-        const SPI_W0_REG: u32 = 0x80;
 
         // SPI_CMD_REG
         const SPI_USR: u32 = 1 << 18;
@@ -520,13 +433,13 @@ impl Flasher {
         const SPI_USR_DUMMY: u32 = 1 << 29;
         const SPI_USR_MISO: u32 = 1 << 28;
         const SPI_USR_MOSI: u32 = 1 << 27;
-        let spi_base = chip.spi_base();
+        let regs = chip.spi_regs();
 
         let mut user_data = SPI_USR_COMMAND;
         let mut user1_data = 0;
         let command = if command_len == 1 { command } else { command.to_be() } as u32;
         let user2_data = (command_len * 8 - 1) << 28 | command;
-        self.write_reg(spi_base + SPI_USER2_REG, user2_data, 0xFFFFFFFF, 0)?;
+        self.write_reg(regs.user2, user2_data, 0xFFFFFFFF, 0)?;
 
         if address_len > 0 {
             user_data |= SPI_USR_ADDR;
@@ -538,7 +451,7 @@ impl Flasher {
                 4 => address.to_be(),
                 _ => unreachable!(),
             };
-            self.write_reg(spi_base + SPI_ADDR_REG, address, 0xFFFFFFFF, 0)?;
+            self.write_reg(regs.addr, address, 0xFFFFFFFF, 0)?;
         }
         if dummy_cycles > 0 {
             user_data |= SPI_USR_DUMMY;
@@ -550,13 +463,12 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= data_len << 17;
             } else {
-                self.write_reg(spi_base + SPI_MOSI_DLEN_REG, data_len, 0xFFFFFFFF, 0)?;
+                self.write_reg(regs.mosi_dlen, data_len, 0xFFFFFFFF, 0)?;
             }
 
             for (pos, val) in data.chunks(4).enumerate() {
-                let reg = spi_base + SPI_W0_REG + (pos as u32) * 4;
                 let val = from_le(val);
-                self.write_reg(reg, val, 0xFFFFFFFF, 0)?;
+                self.write_reg(regs.w(pos), val, 0xFFFFFFFF, 0)?;
             }
         }
         if !output.is_empty() {
@@ -565,15 +477,15 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= output_len << 8;
             } else {
-                self.write_reg(spi_base + SPI_MISO_DLEN_REG, output_len, 0xFFFFFFFF, 0)?;
+                self.write_reg(regs.miso_dlen, output_len, 0xFFFFFFFF, 0)?;
             }
         }
-        self.write_reg(spi_base + SPI_USER1_REG, user1_data, 0xFFFFFFFF, 0)?;
-        self.write_reg(spi_base + SPI_USER_REG, user_data, 0xFFFFFFFF, 0)?;
-        self.write_reg(spi_base + SPI_CMD_REG, SPI_USR, 0xFFFFFFFF, 0)?;
+        self.write_reg(regs.user1, user1_data, 0xFFFFFFFF, 0)?;
+        self.write_reg(regs.user, user_data, 0xFFFFFFFF, 0)?;
+        self.write_reg(regs.cmd, SPI_USR, 0xFFFFFFFF, 0)?;
 
         loop {
-            let cmd = self.read_reg(spi_base + SPI_CMD_REG)?;
+            let cmd = self.read_reg(regs.cmd)?;
             if cmd & SPI_USR == 0 {
                 break;
             }
@@ -582,8 +494,7 @@ impl Flasher {
 
         // Read output.
         for (pos, output_val) in output.chunks_mut(4).enumerate() {
-            let reg = spi_base + SPI_W0_REG + (pos as u32) * 4;
-            let val = self.read_reg(reg)?.to_le_bytes();
+            let val = self.read_reg(regs.w(pos))?.to_le_bytes();
             output_val.copy_from_slice(&val[..output_val.len()]);
         }
         Ok(())

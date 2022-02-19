@@ -17,20 +17,26 @@ My ESP8266's magic number is 0xFFF0C101.
 
 My ESP32's magic number is 0x00F01D83.
 
-## ESP32S2
+## ESP32-S2
 
-My ESP32S2's magic number is 0x000007C6.
+My ESP32-S2's magic number is 0x000007C6.
 
-## ESP32S3
+## ESP32-S3
 
-## ESP32C3
+My ESP32-S3's magic number is 0x00000009.
 
-My ESP32C3's magic number is 0x1B31506F.
+The ESP32-S3 technical reference manual doesn't list SPI register addresses,
+but they do share a base address with the ESP32-C3 and using the same regs
+seem to work to read the flash id.
+
+## ESP32-C3
+
+My ESP32-C3's magic number is 0x1B31506F.
 
 
 # Changing the baud rate
 
-## ESP32C3
+## ESP32-C3
 
 Setting the baud rate to something smaller than 115200 causes timeouts. I
 should attach my logic analyzer to debug.

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+mod chip;
 mod command;
 pub mod event;
 mod flasher;
