@@ -19,6 +19,8 @@ path = "tools/timing.rs"
 [dependencies]
 anyhow = "^1.0.52"
 clap = { version = "^3.0.5", features = ["cargo", "color", "suggestions"] }
+md5 = "^0.7"
 serialport = "^4.0.1"
+sha2 = "^0.10"
 slip-codec = "^0.3.2"
 thiserror = "1.0"

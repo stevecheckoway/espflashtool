@@ -10,42 +10,12 @@ use serialport::SerialPort;
 use crate::chip::Chip;
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
+use crate::{from_le16, from_le32, from_be16, from_le};
 use crate::timeout::ErrorExt;
 
 const DEFAULT_SERIAL_TIMEOUT: Duration = Duration::from_millis(10);
 
 const CHIP_MAGIC_REG: u32 = 0x40001000;
-
-#[inline]
-fn from_le16(data: &[u8]) -> u16 {
-    let data: [u8; 2] = [data[0], data[1]];
-    u16::from_le_bytes(data)
-}
-
-#[inline]
-fn from_le24(data: &[u8]) -> u32 {
-    let data: [u8; 4] = [data[0], data[1], data[2], 0];
-    u32::from_le_bytes(data)
-}
-
-#[inline]
-fn from_le32(data: &[u8]) -> u32 {
-    let data: [u8; 4] = [data[0], data[1], data[2], data[3]];
-    u32::from_le_bytes(data)
-}
-
-#[inline]
-fn from_le(data: &[u8]) -> u32 {
-    assert!(data.len() <= 4);
-    let mut le_data = [0u8; 4];
-    (&mut le_data[..data.len()]).copy_from_slice(data);
-    u32::from_le_bytes(le_data)
-}
-
-#[inline]
-fn from_be16(data: &[u8]) -> u16 {
-    u16::from_be_bytes([data[0], data[1]])
-}
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
 pub enum FlasherError {

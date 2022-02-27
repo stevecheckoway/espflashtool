@@ -3,6 +3,8 @@ use clap::{app_from_crate, arg, App, AppSettings, ArgMatches};
 
 use espflashtool::event::EventTracer;
 use espflashtool::Flasher;
+use espflashtool::image::EspImageHeader;
+use espflashtool::partition::EspPartitionTable;
 // use espflashtool::timeout::ErrorExt;
 
 fn arguments() -> ArgMatches {
@@ -13,7 +15,7 @@ fn arguments() -> ArgMatches {
         .arg(
             arg!(-p --port <PORT> "Path to serial port")
                 .required(false)
-                .global(true),
+                .global(true)
         )
         .arg(
             arg!(-t --trace [PROTOCOL] ... "Trace serial communication")
@@ -35,6 +37,24 @@ fn arguments() -> ArgMatches {
         .subcommand(App::new("detect-chip").about("Detects the type of the ESP chip"))
         .subcommand(App::new("list-ports").about("List serial ports"))
         .subcommand(App::new("flash-id").about("Print the flash ID"))
+        .subcommand(
+            App::new("image-info")
+                .about("Display information about an ESP image")
+                .arg(
+                    arg!(<IMAGE_PATH> "Path to the image")
+                        .required(true)
+                        .allow_invalid_utf8(true)
+                    )
+        )
+        .subcommand(
+            App::new("partition-info")
+                .about("Display information about an ESP partition table")
+                .arg(
+                    arg!(<PARTITION_PATH> "Path to the partition table")
+                        .required(true)
+                        .allow_invalid_utf8(true)
+                    )
+        )
         .get_matches()
 }
 
@@ -85,7 +105,7 @@ fn open_connection(args: &ArgMatches) -> Result<Flasher> {
 
 fn main() -> Result<()> {
     let args = arguments();
-    let (subcmd, _sub_args) = args.subcommand().unwrap();
+    let (subcmd, sub_args) = args.subcommand().unwrap();
 
     match subcmd {
         "detect-chip" => {
@@ -103,6 +123,20 @@ fn main() -> Result<()> {
             let (mid, did) = flasher.flash_id()?;
             println!("{mid:02X} {did:02X}");
             flasher.reset(false)?;
+        }
+        "image-info" => {
+            let path = sub_args.value_of_os("IMAGE_PATH").unwrap();
+            let image = std::fs::read(path)
+                .context("Unable to read image file")?;
+            let header: EspImageHeader = image.as_slice().try_into()?;
+            println!("{header:#x?}");
+        }
+        "partition-info" => {
+            let path = sub_args.value_of_os("PARTITION_PATH").unwrap();
+            let part = std::fs::read(path)
+                .context("Unable to read partition file")?;
+            let table: EspPartitionTable = part.as_slice().try_into()?;
+            println!("{table:#x?}");
         }
         _ => unreachable!(),
     }
