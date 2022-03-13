@@ -2,12 +2,15 @@
 
 mod chip;
 mod command;
+mod elf;
 pub mod event;
 mod flasher;
 pub mod image;
 pub mod partition;
 
 pub use anyhow::{Error, Result};
+pub use chip::Chip;
+pub use elf::elf_to_image;
 pub use flasher::Flasher;
 
 pub mod timeout {

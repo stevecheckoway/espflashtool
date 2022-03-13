@@ -1,9 +1,13 @@
+use std::borrow::Cow;
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
+use binrw::BinWrite;
 use clap::{app_from_crate, arg, App, AppSettings, ArgMatches};
 
 use espflashtool::event::EventTracer;
-use espflashtool::Flasher;
-use espflashtool::image::EspImageHeader;
+use espflashtool::{Flasher, elf_to_image, Chip};
+use espflashtool::image::{EspImage};
 use espflashtool::partition::EspPartitionTable;
 // use espflashtool::timeout::ErrorExt;
 
@@ -16,6 +20,12 @@ fn arguments() -> ArgMatches {
             arg!(-p --port <PORT> "Path to serial port")
                 .required(false)
                 .global(true)
+        )
+        .arg(
+            arg!(-c --chip <CHIP> "ESP chip")
+                .required(false)
+                .global(true)
+                .possible_values(["esp8266", "esp32", "esp32s2", "esp32s3", "esp32c3"])
         )
         .arg(
             arg!(-t --trace [PROTOCOL] ... "Trace serial communication")
@@ -54,6 +64,20 @@ fn arguments() -> ArgMatches {
                         .required(true)
                         .allow_invalid_utf8(true)
                     )
+        )
+        .subcommand(
+            App::new("elf-to-image")
+                .about("Convert an ELF file to an ESP image")
+                .arg(
+                    arg!(<ELF_PATH> "Path to the ELF file")
+                        .required(true)
+                        .allow_invalid_utf8(true)
+                    )
+                .arg(
+                    arg!([OUTPUT_PATH] "Output path; defaults to <ELF_PATH>.bin")
+                        .required(false)
+                        .allow_invalid_utf8(true)
+                )
         )
         .get_matches()
 }
@@ -128,16 +152,36 @@ fn main() -> Result<()> {
             let path = sub_args.value_of_os("IMAGE_PATH").unwrap();
             let image = std::fs::read(path)
                 .context("Unable to read image file")?;
-            let header: EspImageHeader = image.as_slice().try_into()?;
-            println!("{header:#x?}");
+            let esp_image: EspImage = image.as_slice().try_into()?;
+            println!("{esp_image}");
         }
         "partition-info" => {
             let path = sub_args.value_of_os("PARTITION_PATH").unwrap();
             let part = std::fs::read(path)
                 .context("Unable to read partition file")?;
             let table: EspPartitionTable = part.as_slice().try_into()?;
-            println!("{table:#x?}");
+            println!("{table}");
         }
+        "elf-to-image" => {
+            let chip = sub_args.value_of("chip")
+                .map_or(Chip::Esp32,
+                    |chip| Chip::try_from(chip).unwrap());
+            let elf_path = sub_args.value_of_os("ELF_PATH").unwrap();
+            let image_path = sub_args.value_of_os("OUTPUT_PATH")
+                .map_or_else(|| {
+                    let mut pb = PathBuf::from(&elf_path);
+                    pb.set_extension("bin");
+                    Cow::Owned(pb.into_os_string())
+                },
+                |image| Cow::Borrowed(image));
+            let data = std::fs::read(elf_path)?;
+            let image = elf_to_image(chip, &data)?;
+            println!("Writing output to {image_path:#?}");
+            let output = std::fs::File::create(image_path)?;
+            let mut writer = std::io::BufWriter::new(output);
+            image.write_to(&mut writer)?;
+        }
+            
         _ => unreachable!(),
     }
 

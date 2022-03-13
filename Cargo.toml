@@ -8,16 +8,17 @@ rust-version = "1.58"
 
 [lib]
 
-[[bin]]
-name = "espflashtool"
-path = "src/main.rs"
-
-[[bin]]
-name = "timing"
-path = "tools/timing.rs"
+# [[bin]]
+# name = "espflashtool"
+# path = "src/main.rs"
+# 
+# [[bin]]
+# name = "timing"
+# path = "tools/timing.rs"
 
 [dependencies]
 anyhow = "^1.0.52"
+binrw = "^0.8"
 clap = { version = "^3.0.5", features = ["cargo", "color", "suggestions"] }
 md5 = "^0.7"
 serialport = "^4.0.1"

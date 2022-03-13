@@ -1,3 +1,7 @@
+use anyhow::bail;
+
+use crate::{Error, Result};
+
 pub struct SpiRegs {
     pub cmd: u32,
     pub addr: u32,
@@ -35,6 +39,25 @@ impl Chip {
             0x000007c6 => Some(Chip::Esp32S2),
             0x6921506F | 0x1B31506F => Some(Chip::Esp32C3),
             0x00000009 => Some(Chip::Esp32S3),
+            _ => None,
+        }
+    }
+
+    pub fn image_chip_id(self) -> u16 {
+        match self {
+            Chip::Esp8266 | Chip::Esp32 => 0,
+            Chip::Esp32S2 => 2,
+            Chip::Esp32S3 => 9,
+            Chip::Esp32C3 => 5,
+        }
+    }
+
+    pub fn try_from_image_chip_id(id: u16) -> Option<Self> {
+        match id {
+            0 => Some(Chip::Esp32),
+            2 => Some(Chip::Esp32S2),
+            5 => Some(Chip::Esp32C3),
+            9 => Some(Chip::Esp32S3),
             _ => None,
         }
     }
@@ -82,5 +105,32 @@ impl Chip {
                 w0: 0x60002058,
             },
         }
+    }
+}
+
+impl TryFrom<&str> for Chip {
+    type Error = Error;
+
+    fn try_from(value: &str) -> Result<Self> {
+        Ok(match value {
+            "esp8266" => Chip::Esp8266,
+            "esp32" => Chip::Esp32,
+            "esp32s2" => Chip::Esp32S2,
+            "esp32s3" => Chip::Esp32S3,
+            "esp32c3" => Chip::Esp32C3,
+            _ => bail!("Unknown chip: {value}"),
+        })
+    }
+}
+
+impl std::fmt::Display for Chip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Chip::Esp8266 => "ESP8266",
+            Chip::Esp32 => "ESP32",
+            Chip::Esp32S2 => "ESP32-S2",
+            Chip::Esp32S3 => "ESP32-S3",
+            Chip::Esp32C3 => "ESP32-C3",
+        })
     }
 }
