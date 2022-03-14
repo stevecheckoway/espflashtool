@@ -220,7 +220,6 @@ impl EspImage {
 #[cfg(test)]
 mod test {
     use std::io::Cursor;
-    use anyhow::Result;
     use binrw::BinWrite;
 
     use super::*;
