@@ -1,6 +1,4 @@
-use anyhow::bail;
-
-use crate::{Error, Result};
+use crate::Result;
 
 pub struct SpiRegs {
     pub cmd: u32,
@@ -109,16 +107,16 @@ impl Chip {
 }
 
 impl TryFrom<&str> for Chip {
-    type Error = Error;
+    type Error = ();
 
-    fn try_from(value: &str) -> Result<Self> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         Ok(match value {
             "esp8266" => Chip::Esp8266,
             "esp32" => Chip::Esp32,
             "esp32s2" => Chip::Esp32S2,
             "esp32s3" => Chip::Esp32S3,
             "esp32c3" => Chip::Esp32C3,
-            _ => bail!("Unknown chip: {value}"),
+            _ => return Err(()),
         })
     }
 }

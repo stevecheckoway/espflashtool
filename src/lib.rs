@@ -8,10 +8,42 @@ mod flasher;
 pub mod image;
 pub mod partition;
 
-pub use anyhow::{Error, Result};
 pub use chip::Chip;
+use command::CommandError;
 pub use elf::elf_to_image;
 pub use flasher::Flasher;
+use flasher::FlasherError;
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+    /// Represents a command error.
+    #[error(transparent)]
+    CommandError(#[from] CommandError),
+
+    /// Represents a flasher error.
+    #[error(transparent)]
+    FlasherError(#[from] FlasherError),
+
+    /// Represents a serial port error.
+    #[error(transparent)]
+    SerialPortError(#[from] serialport::Error),
+
+    /// Represents a binary format error.
+    #[error("Format error: {}", .0)]
+    FormatError(String),
+
+    /// Represents an I/O error.
+    #[error(transparent)]
+    IOError(#[from] std::io::Error),
+}
+
+impl From<binrw::Error> for Error {
+    fn from(err: binrw::Error) -> Self {
+        Error::FormatError(err.to_string())
+    }
+}
+
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub mod timeout {
     pub trait ErrorExt {
@@ -21,12 +53,15 @@ pub mod timeout {
 
 impl timeout::ErrorExt for Error {
     fn is_timeout(&self) -> bool {
-        self.downcast_ref::<std::io::Error>()
-            .map_or(false, |err| err.kind() == std::io::ErrorKind::TimedOut)
+        match self {
+            Error::IOError(err) => err.kind() == std::io::ErrorKind::TimedOut,
+            Error::SerialPortError(err) => err.kind() == serialport::ErrorKind::Io(std::io::ErrorKind::TimedOut),
+            _ => false,
+        }
     }
 }
 
-impl<T> timeout::ErrorExt for Result<T> {
+impl<T> timeout::ErrorExt for Result<T, Error> {
     fn is_timeout(&self) -> bool {
         self.as_ref().err().map_or(false, |err| err.is_timeout())
     }
@@ -62,4 +97,3 @@ fn from_le(data: &[u8]) -> u32 {
 fn from_be16(data: &[u8]) -> u16 {
     u16::from_be_bytes([data[0], data[1]])
 }
-

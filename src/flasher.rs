@@ -4,13 +4,13 @@ use std::io::{self, Cursor};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
 use serialport::SerialPort;
 
 use crate::chip::Chip;
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
 use crate::{from_le16, from_le32, from_be16, from_le};
+use crate::Result;
 use crate::timeout::ErrorExt;
 
 const DEFAULT_SERIAL_TIMEOUT: Duration = Duration::from_millis(10);
@@ -46,8 +46,7 @@ pub struct Flasher {
 impl Flasher {
     pub fn new(path: &str) -> Result<Self> {
         let serial = serialport::new(path, 115200)
-            .open()
-            .with_context(|| format!("Failed to open {}", path))?;
+            .open()?;
         Ok(Flasher {
             serial,
             buffer: Vec::with_capacity(1024),
@@ -260,7 +259,7 @@ impl Flasher {
             Command::RunUserCode => {}
         }
 
-        let len: u16 = (slip_data.len() - 8).try_into()?;
+        let len: u16 = (slip_data.len() - 8).try_into().expect("Data too long");
         slip_data[2] = len as u8;
         slip_data[3] = (len >> 8) as u8;
         slip_data[4] = checksum;
@@ -461,8 +460,7 @@ impl Flasher {
         }
         let chip = self.chip()?;
         if !self.attached {
-            self.spi_attach()
-                .context("Failed to attach to the SPI flash")?;
+            self.spi_attach()?;
         }
 
         // SPI_CMD_REG
@@ -653,8 +651,7 @@ impl Flasher {
         let cmd = Command::Sync;
         let cmd_code = cmd.code();
         let timeout = cmd.timeout();
-        self.send_command(cmd)
-            .context("Timed out waiting for response to Sync command")?;
+        self.send_command(cmd)?;
 
         for _ in 0..100 {
             match self.read_response(cmd_code, timeout) {

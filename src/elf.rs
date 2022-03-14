@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use crate::{Result, Error};
 use binrw::{binread, BinRead};
 
 use crate::chip::Chip;
@@ -67,7 +67,7 @@ pub fn elf_to_image(chip: Chip, data: &[u8]) -> Result<EspImage> {
     let pheader_end = pheader_size + pheader_offset;
 
     if pheader_end > data.len() {
-        bail!("Invalid ELF program header table");
+        return Err(Error::FormatError("Invalid ELF program header table".into()));
     }
     let mut cursor = std::io::Cursor::new(&data[pheader_offset..pheader_end]);
     for _ in 0..elf_header.e_phnum {
@@ -78,7 +78,7 @@ pub fn elf_to_image(chip: Chip, data: &[u8]) -> Result<EspImage> {
         let start = pheader.p_offset as usize;
         let size = pheader.p_filesz as usize;
         if start + size > data.len() {
-            bail!("Invalid program header");
+            return Err(Error::FormatError("Invalid program header".into()));
         }
         let padded_size = (pheader.p_filesz as usize + 3) & !3;
         let mut seg_data: Vec<u8> = Vec::with_capacity(padded_size);

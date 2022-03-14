@@ -1,6 +1,6 @@
 use std::io::{Seek, SeekFrom, Write};
 
-use anyhow::{Error, Result};
+use crate::{Error, Result};
 use binrw::{binrw, BinRead, BinReaderExt, BinWrite, ReadOptions, WriteOptions};
 use sha2::{Digest, Sha256};
 
