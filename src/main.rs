@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use binrw::BinWrite;
-use clap::{app_from_crate, arg, App, AppSettings, ArgMatches};
+use clap::{arg, command, Command, ArgMatches};
 
 use espflashtool::event::EventTracer;
 use espflashtool::{Flasher, elf_to_image, Chip};
@@ -12,43 +12,48 @@ use espflashtool::partition::EspPartitionTable;
 // use espflashtool::timeout::ErrorExt;
 
 fn arguments() -> ArgMatches {
-    app_from_crate!()
-        .global_setting(AppSettings::PropagateVersion)
-        .global_setting(AppSettings::UseLongFormatForHelpSubcommand)
-        .setting(AppSettings::SubcommandRequiredElseHelp)
+    command!()
+        .propagate_version(true)
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .arg(
+            arg!(-b --baud <BAUD> "Set the serial port speed after connecting")
+            .required(false)
+            .global(true),
+        )
+        .arg(
+            arg!(-c --chip <CHIP> "ESP chip")
+            .required(false)
+            .global(true)
+            .possible_values(["esp8266", "esp32", "esp32s2", "esp32s3", "esp32c3"])
+        )
         .arg(
             arg!(-p --port <PORT> "Path to serial port")
                 .required(false)
                 .global(true)
         )
         .arg(
-            arg!(-c --chip <CHIP> "ESP chip")
+            arg!(-s --stub <STUB> "Path to stub")
                 .required(false)
                 .global(true)
-                .possible_values(["esp8266", "esp32", "esp32s2", "esp32s3", "esp32c3"])
         )
         .arg(
             arg!(-t --trace [PROTOCOL] ... "Trace serial communication")
                 .default_missing_value("all")
-                .use_delimiter(true)
+                .use_value_delimiter(true)
                 .multiple_values(true)
                 .min_values(0)
                 .max_values(1000)
-                .require_delimiter(true)
+                .require_value_delimiter(true)
                 .possible_values(["all", "serial", "line", "slip", "command"])
                 .required(false)
                 .global(true),
         )
-        .arg(
-            arg!(-b --baud <BAUD> "Set the serial port speed after connecting")
-                .required(false)
-                .global(true),
-        )
-        .subcommand(App::new("detect-chip").about("Detects the type of the ESP chip"))
-        .subcommand(App::new("list-ports").about("List serial ports"))
-        .subcommand(App::new("flash-id").about("Print the flash ID"))
+        .subcommand(Command::new("detect-chip").about("Detects the type of the ESP chip"))
+        .subcommand(Command::new("list-ports").about("List serial ports"))
+        .subcommand(Command::new("flash-id").about("Print the flash ID"))
         .subcommand(
-            App::new("image-info")
+            Command::new("image-info")
                 .about("Display information about an ESP image")
                 .arg(
                     arg!(<IMAGE_PATH> "Path to the image")
@@ -57,7 +62,7 @@ fn arguments() -> ArgMatches {
                     )
         )
         .subcommand(
-            App::new("partition-info")
+            Command::new("partition-info")
                 .about("Display information about an ESP partition table")
                 .arg(
                     arg!(<PARTITION_PATH> "Path to the partition table")
@@ -66,7 +71,7 @@ fn arguments() -> ArgMatches {
                     )
         )
         .subcommand(
-            App::new("elf-to-image")
+            Command::new("elf-to-image")
                 .about("Convert an ELF file to an ESP image")
                 .arg(
                     arg!(<ELF_PATH> "Path to the ELF file")
@@ -118,8 +123,17 @@ fn open_connection(args: &ArgMatches) -> Result<Flasher> {
             }
         }));
     }
+    // Read the stub before connecting.
+    let stub = if let Some(path) = args.value_of("stub") {
+        Some(std::fs::read(path)?)
+    } else {
+        None
+    };
     flasher.connect()?;
     flasher.detect_chip()?;
+    if let Some(stub) = stub {
+        flasher.run_stub(&stub)?;
+    }
     if let Some(rate) = args.value_of("baud") {
         let rate: u32 = u32::from_str(rate)?;
         flasher.change_baud_rate(rate)?;

@@ -1,3 +1,4 @@
+use std::cmp::min;
 use std::time::Duration;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
@@ -22,7 +23,7 @@ pub enum Command {
         total_size: u32,
         num_packets: u32,
         packet_size: u32,
-        flash_offset: u32,
+        mem_offset: u32,
     },
     MemEnd {
         execute: bool,
@@ -163,6 +164,26 @@ impl Command {
         }
     }
 
+    pub fn mem_begin(mem_offset: u32, total_size: u32) -> Self {
+        let packet_size = min(total_size, 0x4000);
+        Command::MemBegin {
+            total_size,
+            num_packets: (total_size + packet_size - 1) / packet_size,
+            packet_size,
+            mem_offset,
+        }
+    }
+
+    pub fn flash_begin(flash_offset: u32, total_size: u32) -> Self {
+        let packet_size = min(total_size, 0x4000);
+        Command::FlashBegin {
+            total_size,
+            num_packets: (total_size + packet_size - 1) / packet_size,
+            packet_size,
+            flash_offset,
+        }
+    }
+
     pub fn timeout(&self) -> Duration {
         match self {
             Command::Sync => SYNC_TIMEOUT,
@@ -194,6 +215,39 @@ pub enum CommandError {
     #[error("Deflate error")]
     DeflateError,
 
+    #[error("Bad data length")]
+    BadDataLen,
+
+    #[error("Bad data checksum")]
+    BadDataChecksum,
+
+    #[error("Bad blocksize")]
+    BadBlocksize,
+
+    #[error("Invalid command")]
+    InvalidCommand,
+
+    #[error("Failed SPI operation")]
+    FailedSpiOp,
+
+    #[error("Failed SPI unlock")]
+    FailedSpiUnlock,
+
+    #[error("Not in flash mode")]
+    NotInFlashMode,
+
+    #[error("Inflate error")]
+    InflateError,
+
+    #[error("Not enough data")]
+    NotEnoughData,
+
+    #[error("Too much data")]
+    TooMuchData,
+
+    #[error("Command not implemented")]
+    CommandNotImplemented,
+
     #[error("Unknown error code")]
     UnknownErrorCode,
 
@@ -203,15 +257,27 @@ pub enum CommandError {
 
 impl From<u8> for CommandError {
     fn from(value: u8) -> Self {
+        use CommandError::*;
         match value {
-            0x05 => CommandError::ReceivedMessageInvalid,
-            0x06 => CommandError::FailedToActOnMessage,
-            0x07 => CommandError::InvalidCrc,
-            0x08 => CommandError::FlashWriteError,
-            0x09 => CommandError::FlashReadError,
-            0x0A => CommandError::FlashReadLengthError,
-            0x0B => CommandError::DeflateError,
-            _ => CommandError::UnknownErrorCode,
+            0x05 => ReceivedMessageInvalid,
+            0x06 => FailedToActOnMessage,
+            0x07 => InvalidCrc,
+            0x08 => FlashWriteError,
+            0x09 => FlashReadError,
+            0x0A => FlashReadLengthError,
+            0x0B => DeflateError,
+            0xC0 => BadDataLen,
+            0xC1 => BadDataChecksum,
+            0xC2 => BadBlocksize,
+            0xC3 => InvalidCommand,
+            0xC4 => FailedSpiOp,
+            0xC5 => FailedSpiUnlock,
+            0xC6 => NotInFlashMode,
+            0xC7 => InflateError,
+            0xC8 => NotEnoughData,
+            0xC9 => TooMuchData,
+            0xFF => CommandNotImplemented,
+            _ => UnknownErrorCode,
         }
     }
 }

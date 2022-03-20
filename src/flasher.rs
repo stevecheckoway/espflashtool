@@ -1,15 +1,17 @@
 use std::borrow::Cow;
-use std::cmp::max;
+use std::cmp::{max, min};
 use std::io::{self, Cursor};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
+use binrw::BinRead;
 use serialport::SerialPort;
 
 use crate::chip::Chip;
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
-use crate::{from_le16, from_le32, from_be16, from_le};
+use crate::stub::Stub;
+use crate::{from_le16, from_le32, from_be16, from_le, Error};
 use crate::Result;
 use crate::timeout::ErrorExt;
 
@@ -30,6 +32,9 @@ pub enum FlasherError {
 
     #[error("Invalid SPI command or address length")]
     InvalidSpiCommand,
+
+    #[error("Invalid stub hello")]
+    InvalidStubHello,
 }
 
 pub struct Flasher {
@@ -170,7 +175,7 @@ impl Flasher {
                 total_size,
                 num_packets,
                 packet_size,
-                flash_offset,
+                mem_offset: flash_offset,
             }
             | Command::FlashDeflBegin {
                 total_size,
@@ -603,7 +608,7 @@ impl Flasher {
             total_size,
             num_packets,
             packet_size,
-            flash_offset,
+            mem_offset: flash_offset,
         })?;
         Ok(())
     }
@@ -736,4 +741,68 @@ impl Flasher {
         }
         Err(FlasherError::UnknownDevice(magic).into())
     }
+
+    /// Write `data` to RAM at address `addr`. If `entry` is `Some(entry_point)`, then
+    /// after receiving the data and writing it to ram, the loader will jump to the
+    /// `entry_point` address.
+    pub fn write_ram(&mut self, addr: u32, data: &[u8], entry: Option<u32>) -> Result<()> {
+        let packet_size = min(data.len(), 0x4000);
+        let total_size: u32 = data.len().try_into().unwrap();
+        let num_packets = (total_size + packet_size as u32 - 1) / packet_size as u32;
+        self.send_command(Command::MemBegin {
+            total_size,
+            num_packets,
+            packet_size: packet_size as u32,
+            mem_offset: addr,
+        })?;
+
+        for (num, chunk) in data.chunks(packet_size).enumerate() {
+            let chunk = if chunk.len() == packet_size {
+                Cow::Borrowed(chunk)
+            } else {
+                let mut owned: Vec<u8> = Vec::with_capacity(packet_size);
+                owned.extend(chunk);
+                owned.resize(packet_size, 0xFF);
+                Cow::Owned(owned)
+            };
+            self.send_command_with_data(Command::MemData { sequence_num: num as u32 }, &chunk)?;
+        }
+
+        if let Some(entry) = entry {
+            let ret = self.send_command(Command::MemEnd {
+                execute: true,
+                entry_point: entry,
+            });
+
+            if !ret.is_timeout() {
+                return ret.map(|_| ());
+            }
+        }
+        Ok(())
+    }
+
+    // pub fn write_flash(&mut self, addr: u32, data: &[u8], compressed: bool, reboot: bool) -> Result<()> {
+
+    // }
+
+    pub fn run_stub(&mut self, stub: &[u8]) -> Result<()> {
+        let stub = Stub::read(&mut std::io::Cursor::new(stub))?;
+        let chip = stub.chip()
+            .ok_or_else(|| Error::FormatError(format!("Unknown stub chip ID: {:X}", stub.chip)))?;
+        let this_chip = self.chip()?;
+        if chip != this_chip {
+            return Err(Error::FormatError(format!("Stub for {chip} not supported for {this_chip}")));
+        }
+        self.write_ram(stub.text_start, &stub.text, None)?;
+        self.write_ram(stub.data_start, &stub.data, Some(stub.entry))?;
+        let ohai = self.read_packet(DEFAULT_SERIAL_TIMEOUT)?;
+
+        if ohai != b"OHAI" {
+            return Err(FlasherError::InvalidStubHello.into());
+        }
+        self.rom_loader = false;
+        self.status_size = 2;
+        Ok(())
+    }
+
 }

@@ -7,6 +7,7 @@ pub mod event;
 mod flasher;
 pub mod image;
 pub mod partition;
+mod stub;
 
 pub use chip::Chip;
 use command::CommandError;
