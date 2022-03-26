@@ -56,7 +56,9 @@ impl timeout::ErrorExt for Error {
     fn is_timeout(&self) -> bool {
         match self {
             Error::IOError(err) => err.kind() == std::io::ErrorKind::TimedOut,
-            Error::SerialPortError(err) => err.kind() == serialport::ErrorKind::Io(std::io::ErrorKind::TimedOut),
+            Error::SerialPortError(err) => {
+                err.kind() == serialport::ErrorKind::Io(std::io::ErrorKind::TimedOut)
+            }
             _ => false,
         }
     }

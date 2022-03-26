@@ -1,4 +1,4 @@
-use crate::{Result, Error};
+use crate::{Error, Result};
 use binrw::{BinRead, BinWrite};
 use std::borrow::Cow;
 use std::fmt::{Display, Write};
@@ -74,7 +74,7 @@ fn type_name(type_: u8, subtype: u8) -> (Cow<'static, str>, Cow<'static, str>) {
                 0x10..=0x1F => Cow::Owned(format!("ota{subtype:02X}")),
                 SUBTYPE_APP_TEST => Cow::Borrowed("test"),
                 _ => hex(subtype),
-            }
+            },
         ),
         TYPE_DATA => (
             Cow::Borrowed("data"),
@@ -89,22 +89,29 @@ fn type_name(type_: u8, subtype: u8) -> (Cow<'static, str>, Cow<'static, str>) {
                 SUBTYPE_DATA_FAT => Cow::Borrowed("fat"),
                 SUBTYPE_DATA_SPIFFS => Cow::Borrowed("spiffs"),
                 _ => hex(subtype),
-            }
+            },
         ),
-        _ => (hex(type_), hex(subtype))
+        _ => (hex(type_), hex(subtype)),
     }
 }
 
 impl Display for PartitionEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PartitionEntry::Partition { type_, subtype, offset, size, label, flags } => {
+            PartitionEntry::Partition {
+                type_,
+                subtype,
+                offset,
+                size,
+                label,
+                flags,
+            } => {
                 let label = if let Some(last) = label.iter().rposition(|x| *x != 0) {
                     &label[..=last]
                 } else {
                     label
                 };
-                for ch in label.into_iter().flat_map(|ch| std::ascii::escape_default(*ch)) {
+                for ch in label.iter().flat_map(|ch| std::ascii::escape_default(*ch)) {
                     f.write_char(ch.into())?;
                 }
                 let (t_name, s_name) = type_name(*type_, *subtype);

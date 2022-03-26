@@ -3,13 +3,13 @@ cli:
   version: 0.8.1-beta
 lint:
   enabled:
-    - black-py@21.10b0
-    - clippy@1.56.1
-    - flake8@3.9.2
-    - gitleaks@7.6.1
-    - isort@5.9.3
-    - markdownlint@0.29.0
-    - prettier@2.4.1
+    - black-py@22.1.0
+    - clippy@1.58.1
+    - flake8@4.0.1
+    - gitleaks@8.5.1
+    - isort@5.10.1
+    - markdownlint@0.31.1
+    - prettier@2.6.1
     - rustfmt@1.58.1
     - taplo@release-cli-0.5.0
     - taplo-fmt@release-cli-0.5.0

@@ -24,7 +24,7 @@ impl Stub {
         match self.chip {
             0..=0xFFFF => Chip::try_from_image_chip_id(self.chip as u16),
             0x10000 => Some(Chip::Esp8266),
-            _ => None
+            _ => None,
         }
     }
 }

@@ -82,9 +82,9 @@ fn checksum_writer<W: binrw::io::Write + binrw::io::Seek>(
     const ZEROS: [u8; 15] = [0; 15];
     let pos = (writer.stream_position()? % 16) as usize;
     if pos < 15 {
-        writer.write(&ZEROS[pos..])?;
+        writer.write_all(&ZEROS[pos..])?;
     }
-    writer.write(&[checksum])?;
+    writer.write_all(&[checksum])?;
     Ok(())
 }
 
@@ -113,41 +113,58 @@ impl TryFrom<&[u8]> for EspImage {
 
 impl std::fmt::Display for EspImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("Entry point: 0x{:08X}\n", self.header.entry_addr))?;
+        f.write_fmt(format_args!(
+            "Entry point: 0x{:08X}\n",
+            self.header.entry_addr
+        ))?;
         if let Some(chip_id) = Chip::try_from_image_chip_id(self.header.chip_id) {
             f.write_fmt(format_args!("Chip Id: {chip_id}\n"))?;
         } else {
             f.write_fmt(format_args!("Chip Id: 0x{:04X}\n", self.header.chip_id))?;
         }
 
-
-        f.write_fmt(format_args!("{} segment{}\n\n",
+        f.write_fmt(format_args!(
+            "{} segment{}\n\n",
             self.header.segment_count,
-            if self.header.segment_count == 1 { "" } else { "s" },
+            if self.header.segment_count == 1 {
+                ""
+            } else {
+                "s"
+            },
         ))?;
         let mut offset: usize = 24 + 8;
         for (num, seg) in self.segments.iter().enumerate() {
             let num = num + 1;
             let len = seg.data.len();
             let addr = seg.load_addr;
-            f.write_fmt(format_args!("Segment {num}: len 0x{len:05X} load 0x{addr:08X} file_offs 0x{offset:08X}\n"))?;
+            f.write_fmt(format_args!(
+                "Segment {num}: len 0x{len:05X} load 0x{addr:08X} file_offs 0x{offset:08X}\n"
+            ))?;
             offset += 8 + len;
         }
         let expected_sum = self.compute_checksum();
         let actual_sum = self.checksum;
-        let valid = if actual_sum == expected_sum { "valid" } else { "invalid" };
+        let valid = if actual_sum == expected_sum {
+            "valid"
+        } else {
+            "invalid"
+        };
         f.write_fmt(format_args!("\nChecksum: {actual_sum:02X} ({valid})"))?;
 
         if let Some(ref actual_hash) = self.hash {
             let expected_hash = self.compute_hash();
-            let valid = if actual_hash == &expected_hash { "valid" } else { "invalid" };
+            let valid = if actual_hash == &expected_hash {
+                "valid"
+            } else {
+                "invalid"
+            };
             f.write_str("\nHash: ")?;
             for &x in actual_hash {
                 f.write_fmt(format_args!("{:02X}", x))?;
             }
             f.write_fmt(format_args!(" ({valid})"))?;
         }
-        
+
         Ok(())
     }
 }
@@ -164,7 +181,9 @@ impl Write for HashWrapper {
         Ok(buf.len())
     }
 
-    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Seek for HashWrapper {
@@ -219,14 +238,15 @@ impl EspImage {
 
 #[cfg(test)]
 mod test {
-    use std::io::Cursor;
     use binrw::BinWrite;
+    use std::io::Cursor;
 
     use super::*;
 
-    fn bin<BW>(bw: BW) -> Result<Vec<u8>> where
+    fn bin<BW>(bw: BW) -> Result<Vec<u8>>
+    where
         BW: BinWrite,
-        <BW as BinWrite>::Args: Default
+        <BW as BinWrite>::Args: Default,
     {
         let mut data: Vec<u8> = Vec::new();
         bw.write_to(&mut Cursor::new(&mut data))?;
@@ -239,7 +259,10 @@ mod test {
             load_addr: 0xAABBCCDD,
             data: vec![0, 1, 2, 3, 4],
         })?;
-        assert_eq!(&data, b"\xDD\xCC\xBB\xAA\x05\x00\x00\x00\x00\x01\x02\x03\x04");
+        assert_eq!(
+            &data,
+            b"\xDD\xCC\xBB\xAA\x05\x00\x00\x00\x00\x01\x02\x03\x04"
+        );
         Ok(())
     }
 

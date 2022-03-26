@@ -11,9 +11,9 @@ use crate::chip::Chip;
 use crate::command::{Command, CommandError};
 use crate::event::{Event, EventObserver};
 use crate::stub::Stub;
-use crate::{from_le16, from_le32, from_be16, from_le, Error};
-use crate::Result;
 use crate::timeout::ErrorExt;
+use crate::Result;
+use crate::{from_be16, from_le, from_le16, from_le32, Error};
 
 const DEFAULT_SERIAL_TIMEOUT: Duration = Duration::from_millis(10);
 
@@ -50,8 +50,7 @@ pub struct Flasher {
 
 impl Flasher {
     pub fn new(path: &str) -> Result<Self> {
-        let serial = serialport::new(path, 115200)
-            .open()?;
+        let serial = serialport::new(path, 115200).open()?;
         Ok(Flasher {
             serial,
             buffer: Vec::with_capacity(1024),
@@ -765,7 +764,12 @@ impl Flasher {
                 owned.resize(packet_size, 0xFF);
                 Cow::Owned(owned)
             };
-            self.send_command_with_data(Command::MemData { sequence_num: num as u32 }, &chunk)?;
+            self.send_command_with_data(
+                Command::MemData {
+                    sequence_num: num as u32,
+                },
+                &chunk,
+            )?;
         }
 
         if let Some(entry) = entry {
@@ -787,11 +791,14 @@ impl Flasher {
 
     pub fn run_stub(&mut self, stub: &[u8]) -> Result<()> {
         let stub = Stub::read(&mut std::io::Cursor::new(stub))?;
-        let chip = stub.chip()
+        let chip = stub
+            .chip()
             .ok_or_else(|| Error::FormatError(format!("Unknown stub chip ID: {:X}", stub.chip)))?;
         let this_chip = self.chip()?;
         if chip != this_chip {
-            return Err(Error::FormatError(format!("Stub for {chip} not supported for {this_chip}")));
+            return Err(Error::FormatError(format!(
+                "Stub for {chip} not supported for {this_chip}"
+            )));
         }
         self.write_ram(stub.text_start, &stub.text, None)?;
         self.write_ram(stub.data_start, &stub.data, Some(stub.entry))?;
@@ -804,5 +811,4 @@ impl Flasher {
         self.status_size = 2;
         Ok(())
     }
-
 }
