@@ -1,10 +1,14 @@
 use std::cmp::min;
 use std::time::Duration;
 
+use binrw::binrw;
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
 const SYNC_TIMEOUT: Duration = Duration::from_millis(100);
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
+#[binrw]
+#[brw(import(rom_loader: bool), little)]
 pub enum Command {
     // Commands supported by the ESP8266 & ESP32 bootloaders.
     FlashBegin {
@@ -14,10 +18,12 @@ pub enum Command {
         flash_offset: u32,
     },
     FlashData {
+        data_size: u32,
+        #[brw(pad_after = 8)]
         sequence_num: u32,
     },
     FlashEnd {
-        reboot: bool,
+        reboot: u32,
     },
     MemBegin {
         total_size: u32,
@@ -26,12 +32,15 @@ pub enum Command {
         mem_offset: u32,
     },
     MemEnd {
-        execute: bool,
+        execute: u32,
         entry_point: u32,
     },
     MemData {
+        data_size: u32,
+        #[brw(pad_after = 8)]
         sequence_num: u32,
     },
+    #[brw(magic = b"\x07\x07\x12 UUUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU")]
     Sync,
     WriteReg {
         address: u32,
@@ -45,13 +54,27 @@ pub enum Command {
 
     // Commands supported by the ESP32 bootloader.
     SpiSetParams {
-        size: u32,
+        id: u32,
+        total_size: u32,
+        block_size: u32,
+        sector_size: u32,
+        page_size: u32,
+        status_mask: u32,
     },
     SpiAttach {
         pins: u32,
+        #[br(if(rom_loader, 0))]
+        #[bw(args_raw = rom_loader, write_with = |data: &u32, writer, opts, rom_loader| {
+            if rom_loader {
+                data.write_options(writer, opts, ())?;
+            }
+            Ok(())
+        })]
+        rom_only: u32,
     },
     ChangeBaudRate {
         new_rate: u32,
+        old_rate: u32,
     },
     FlashDeflBegin {
         // Uncompressed size.
@@ -61,13 +84,16 @@ pub enum Command {
         flash_offset: u32,
     },
     FlashDeflData {
+        data_size: u32,
+        #[brw(pad_after = 8)]
         sequence_num: u32,
     },
     FlashDeflEnd {
-        reboot: bool,
+        reboot: u32,
     },
     SpiFlashMD5 {
         address: u32,
+        #[brw(pad_after = 8)]
         size: u32,
     },
 
@@ -136,6 +162,7 @@ impl Command {
                 | (f(d_pin) << 12)
                 | (f(cs_pin) << 6)
                 | f(clk_pin),
+            rom_only: 0,
         }
     }
 

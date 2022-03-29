@@ -1,10 +1,10 @@
 use std::borrow::Cow;
 use std::cmp::{max, min};
-use std::io::{self, Cursor};
+use std::io::{self, BufRead, BufReader, Cursor};
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use binrw::BinRead;
+use binrw::{BinRead, BinWrite};
 use serialport::SerialPort;
 
 use crate::chip::Chip;
@@ -38,8 +38,7 @@ pub enum FlasherError {
 }
 
 pub struct Flasher {
-    serial: Box<dyn SerialPort>,
-    buffer: Vec<u8>,
+    serial: BufReader<Box<dyn SerialPort>>,
     status_size: usize,
     rom_loader: bool,
     observers: Vec<Weak<dyn EventObserver>>,
@@ -52,8 +51,7 @@ impl Flasher {
     pub fn new(path: &str) -> Result<Self> {
         let serial = serialport::new(path, 115200).open()?;
         Ok(Flasher {
-            serial,
-            buffer: Vec::with_capacity(1024),
+            serial: BufReader::new(serial),
             status_size: 0,
             rom_loader: true,
             observers: Vec::new(),
@@ -93,6 +91,10 @@ impl Flasher {
         }
     }
 
+    fn serial(&mut self) -> &mut dyn SerialPort {
+        self.serial.get_mut().as_mut()
+    }
+
     fn send_packet(&mut self, data: &[u8]) -> Result<()> {
         let mut encoder = slip_codec::SlipEncoder::new(true);
         let mut output: Vec<u8> = Vec::with_capacity(data.len() + 8);
@@ -100,34 +102,38 @@ impl Flasher {
         encoder.encode(data, &mut output)?;
         self.trace(Event::SlipWrite(Cow::from(data)));
 
-        self.serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
-        self.serial.write_all(&output)?;
+        let serial = self.serial();
+        serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
+        serial.write_all(&output)?;
         self.trace(Event::SerialWrite(Cow::from(&output)));
         Ok(())
     }
 
     fn read_packet(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let start_time = Instant::now();
+        let read_start = Instant::now();
         let mut decoder = slip_codec::SlipDecoder::new();
         let mut response: Vec<u8> = Vec::new();
 
+        self.serial().set_timeout(timeout)?;
         loop {
-            if self.buffer.is_empty() {
-                self.fill_buffer(timeout.saturating_sub(start_time.elapsed()))?;
-            }
+            let buffer = self.serial.fill_buf()?;
+            let mut cursor = Cursor::new(buffer);
 
-            let mut cursor = Cursor::new(&self.buffer);
             match decoder.decode(&mut cursor, &mut response) {
                 Ok(_) => {
                     // A complete packet has been decoded.
                     let size = cursor.position() as usize;
-                    self.buffer.drain(..size);
+                    self.serial.consume(size);
                     self.trace(Event::SlipRead(Cow::from(&response)));
                     return Ok(response);
                 }
                 Err(slip_codec::SlipError::EndOfStream) => {
-                    // The decoder did not hit the end of the packet but did consume all of self.buffer.
-                    self.buffer.clear();
+                    // The decoder did not hit the end of the packet but did consume all of buffer.
+                    let len = buffer.len();
+                    self.serial.consume(len);
+                    let remaining_time = timeout.saturating_sub(read_start.elapsed());
+                    self.serial()
+                        .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, remaining_time))?;
                 }
                 Err(err) => {
                     panic!("Programming error: decoder.decode() returned {:?}", err);
@@ -142,14 +148,12 @@ impl Flasher {
     }
 
     fn send_command_with_data(&mut self, cmd: Command, data: &[u8]) -> Result<(u32, Vec<u8>)> {
-        let add_words = |v: &mut Vec<u8>, words: &[u32]| {
-            for word in words {
-                v.extend(word.to_le_bytes());
-            }
-        };
         let mut slip_data: Vec<u8> = Vec::with_capacity(64);
-        let mut checksum: u8 = 0;
         let cmd_code = cmd.code();
+        let mut checksum = 0xEFu8;
+        for x in data {
+            checksum ^= *x;
+        }
 
         /*
          * A Command packet is sent as a SLIP frame with a header and data.
@@ -161,107 +165,13 @@ impl Flasher {
          *
          * Followed by data.
          */
-        slip_data.extend(&[0, cmd_code, 0, 0, 0, 0, 0, 0]);
-
-        match cmd {
-            Command::FlashBegin {
-                total_size,
-                num_packets,
-                packet_size,
-                flash_offset,
-            }
-            | Command::MemBegin {
-                total_size,
-                num_packets,
-                packet_size,
-                mem_offset: flash_offset,
-            }
-            | Command::FlashDeflBegin {
-                total_size,
-                num_packets,
-                packet_size,
-                flash_offset,
-            } => {
-                add_words(
-                    &mut slip_data,
-                    &[total_size, num_packets, packet_size, flash_offset],
-                );
-            }
-            Command::FlashData { sequence_num }
-            | Command::MemData { sequence_num }
-            | Command::FlashDeflData { sequence_num } => {
-                add_words(&mut slip_data, &[data.len() as u32, sequence_num, 0, 0]);
-                checksum = 0xEFu8;
-                for x in data {
-                    checksum ^= *x;
-                }
-                slip_data.extend(data);
-            }
-            Command::FlashEnd { reboot } | Command::FlashDeflEnd { reboot } => {
-                let reboot_or_run_user_code = if reboot { 0 } else { 1 };
-                add_words(&mut slip_data, &[reboot_or_run_user_code])
-            }
-            Command::MemEnd {
-                execute,
-                entry_point,
-            } => {
-                let val = if execute { 0 } else { 1 };
-                add_words(&mut slip_data, &[val, entry_point]);
-            }
-            Command::Sync => {
-                slip_data.extend(&[0x07, 0x07, 0x12, 0x20]);
-                slip_data.resize(slip_data.len() + 32, 0x55);
-            }
-            Command::WriteReg {
-                address,
-                value,
-                mask,
-                delay,
-            } => {
-                add_words(&mut slip_data, &[address, value, mask, delay]);
-            }
-            Command::ReadReg { address } => {
-                add_words(&mut slip_data, &[address]);
-            }
-            Command::SpiSetParams { size } => {
-                // id, total size, block size, sector size, page size, status mask
-                add_words(&mut slip_data, &[0, size, 0x10000, 0x1000, 0x100, 0xFFFF]);
-            }
-            Command::SpiAttach { pins } => {
-                if self.rom_loader {
-                    add_words(&mut slip_data, &[pins, 0]);
-                } else {
-                    add_words(&mut slip_data, &[pins]);
-                }
-            }
-            Command::ChangeBaudRate { new_rate } => {
-                let old_rate = if self.rom_loader {
-                    0
-                } else {
-                    self.serial.baud_rate()?
-                };
-                add_words(&mut slip_data, &[new_rate, old_rate]);
-            }
-            Command::SpiFlashMD5 { address, size } => {
-                add_words(&mut slip_data, &[address, size, 0, 0]);
-            }
-            Command::EraseFlash => {}
-            Command::EraseRegion { offset, size } => {
-                add_words(&mut slip_data, &[offset, size]);
-            }
-            Command::ReadFlash {
-                offset,
-                read_length,
-                packet_size,
-                max_pending_packets,
-            } => {
-                add_words(
-                    &mut slip_data,
-                    &[offset, read_length, packet_size, max_pending_packets],
-                );
-            }
-            Command::RunUserCode => {}
+        slip_data.extend(&[0, cmd_code, 0, 0, checksum, 0, 0, 0]);
+        {
+            let mut cursor = Cursor::new(&mut slip_data);
+            cursor.set_position(8);
+            cmd.write_with_args(&mut cursor, (self.rom_loader,))?;
         }
+        slip_data.extend(data);
 
         let len: u16 = (slip_data.len() - 8).try_into().expect("Data too long");
         slip_data[2] = len as u8;
@@ -343,35 +253,22 @@ impl Flasher {
         let read_start = Instant::now();
         let mut line: Vec<u8> = Vec::new();
 
+        self.serial().set_timeout(timeout)?;
         loop {
-            if self.buffer.is_empty() {
-                self.fill_buffer(timeout.saturating_sub(read_start.elapsed()))?;
-            }
+            let buffer = self.serial.fill_buf()?;
 
-            if let Some(idx) = self.buffer.iter().position(|&x| x == b'\n') {
-                line.extend(self.buffer.drain(..idx + 1));
+            if let Some(idx) = buffer.iter().position(|&x| x == b'\n') {
+                line.extend(&buffer[..idx + 1]);
+                self.serial.consume(idx + 1);
                 self.trace(Event::SerialLine(Cow::from(&line)));
                 return Ok(line);
             }
-            line.append(&mut self.buffer);
-        }
-    }
-
-    fn fill_buffer(&mut self, timeout: Duration) -> Result<()> {
-        self.buffer.resize(1024, 0);
-        self.serial
-            .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, timeout))?;
-        match self.serial.read(&mut self.buffer) {
-            Ok(n) => {
-                self.buffer.truncate(n);
-                self.trace_only(Event::SerialRead(Cow::from(&self.buffer)));
-                Ok(())
-            }
-            Err(err) => {
-                // XXX: Trace?
-                self.buffer.clear();
-                Err(err.into())
-            }
+            line.extend(buffer);
+            let len = buffer.len();
+            self.serial.consume(len);
+            let remaining_time = timeout.saturating_sub(read_start.elapsed());
+            self.serial()
+                .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, remaining_time))?;
         }
     }
 
@@ -553,19 +450,22 @@ impl Flasher {
 
     pub fn reset(&mut self, enter_bootloader: bool) -> Result<()> {
         self.trace(Event::Reset);
-        self.buffer.clear();
+        self.serial.consume(self.serial.buffer().len());
+
+        let serial = self.serial();
+        serial.clear(serialport::ClearBuffer::All)?;
 
         // /RTS is connected to EN
         // /DTR is connected to GPIO0
-        self.serial.write_request_to_send(true)?;
-        self.serial.write_data_terminal_ready(false)?;
+        serial.write_request_to_send(true)?;
+        serial.write_data_terminal_ready(false)?;
         std::thread::sleep(Duration::from_millis(100));
-        self.serial.clear(serialport::ClearBuffer::All)?;
+        serial.clear(serialport::ClearBuffer::All)?;
 
-        self.serial.write_data_terminal_ready(enter_bootloader)?;
-        self.serial.write_request_to_send(false)?;
+        serial.write_data_terminal_ready(enter_bootloader)?;
+        serial.write_request_to_send(false)?;
         std::thread::sleep(Duration::from_millis(500));
-        self.serial.write_data_terminal_ready(false)?;
+        serial.write_data_terminal_ready(false)?;
 
         Ok(())
     }
@@ -587,11 +487,18 @@ impl Flasher {
     }
 
     pub fn flash_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        self.send_command_with_data(Command::FlashData { sequence_num }, data)?;
+        self.send_command_with_data(
+            Command::FlashData {
+                sequence_num,
+                data_size: data.len() as u32,
+            },
+            data,
+        )?;
         Ok(())
     }
 
     pub fn flash_end(&mut self, reboot: bool) -> Result<()> {
+        let reboot = if reboot { 0 } else { 1 };
         self.send_command(Command::FlashEnd { reboot })?;
         Ok(())
     }
@@ -613,13 +520,19 @@ impl Flasher {
     }
 
     pub fn mem_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        self.send_command_with_data(Command::MemData { sequence_num }, data)?;
+        self.send_command_with_data(
+            Command::MemData {
+                data_size: data.len() as u32,
+                sequence_num,
+            },
+            data,
+        )?;
         Ok(())
     }
 
     pub fn mem_end(&mut self, execute: bool, entry_point: u32) -> Result<()> {
         self.send_command(Command::MemEnd {
-            execute,
+            execute: if execute { 0 } else { 1 },
             entry_point,
         })?;
         Ok(())
@@ -642,11 +555,19 @@ impl Flasher {
     }
 
     pub fn flash_defl_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        self.send_command_with_data(Command::FlashDeflData { sequence_num }, data)?;
+        let data_size = data.len().try_into().expect("data too long");
+        self.send_command_with_data(
+            Command::FlashDeflData {
+                data_size,
+                sequence_num,
+            },
+            data,
+        )?;
         Ok(())
     }
 
     pub fn flash_defl_end(&mut self, reboot: bool) -> Result<()> {
+        let reboot = if reboot { 0 } else { 1 };
         self.send_command(Command::FlashDeflEnd { reboot })?;
         Ok(())
     }
@@ -683,25 +604,38 @@ impl Flasher {
             .map(|(value, _data)| value)
     }
 
-    pub fn spi_set_params(&mut self, size: u32) -> Result<()> {
-        self.send_command(Command::SpiSetParams { size })?;
+    pub fn spi_set_params(&mut self, total_size: u32) -> Result<()> {
+        self.send_command(Command::SpiSetParams {
+            id: 0,
+            total_size,
+            block_size: 0x10000,
+            sector_size: 0x1000,
+            page_size: 0x100,
+            status_mask: 0xFFFF,
+        })?;
         Ok(())
     }
 
     pub fn spi_attach(&mut self) -> Result<()> {
-        self.send_command(Command::SpiAttach { pins: 0 })?;
+        self.send_command(Command::SpiAttach {
+            pins: 0,
+            rom_only: 0,
+        })?;
         self.attached = true;
         Ok(())
     }
 
     pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {
-        self.send_command(Command::ChangeBaudRate { new_rate })?;
-        self.buffer.clear();
-        self.serial.set_baud_rate(new_rate)?;
-        while self.serial.bytes_to_read()? > 0 {
-            self.serial.clear(serialport::ClearBuffer::All)?;
-            std::thread::sleep(Duration::from_millis(5));
-        }
+        let old_rate = if self.rom_loader {
+            0
+        } else {
+            self.serial().baud_rate()?
+        };
+        self.send_command(Command::ChangeBaudRate { new_rate, old_rate })?;
+        self.serial.consume(self.serial.buffer().len());
+        let serial = self.serial();
+        serial.flush()?;
+        serial.set_baud_rate(new_rate)?;
         Ok(())
     }
 
@@ -766,6 +700,7 @@ impl Flasher {
             };
             self.send_command_with_data(
                 Command::MemData {
+                    data_size: packet_size as u32,
                     sequence_num: num as u32,
                 },
                 &chunk,
@@ -774,7 +709,7 @@ impl Flasher {
 
         if let Some(entry) = entry {
             let ret = self.send_command(Command::MemEnd {
-                execute: true,
+                execute: 0,
                 entry_point: entry,
             });
 
@@ -790,7 +725,7 @@ impl Flasher {
     // }
 
     pub fn run_stub(&mut self, stub: &[u8]) -> Result<()> {
-        let stub = Stub::read(&mut std::io::Cursor::new(stub))?;
+        let stub = Stub::read(&mut Cursor::new(stub))?;
         let chip = stub
             .chip()
             .ok_or_else(|| Error::FormatError(format!("Unknown stub chip ID: {:X}", stub.chip)))?;
