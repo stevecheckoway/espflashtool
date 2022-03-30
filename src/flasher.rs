@@ -105,6 +105,7 @@ impl Flasher {
         }
     }
 
+    #[inline]
     fn serial(&mut self) -> &mut dyn SerialPort {
         self.serial.get_mut().as_mut()
     }
@@ -119,7 +120,7 @@ impl Flasher {
         let serial = self.serial();
         serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
         serial.write_all(&output)?;
-        self.trace(Event::SerialWrite(Cow::from(&output)));
+        self.trace(Event::SerialWrite(Cow::from(output)));
         Ok(())
     }
 
@@ -226,7 +227,7 @@ impl Flasher {
                     }
                 }
             {
-                self.trace(Event::InvalidResponse(Cow::from(&response)));
+                self.trace(Event::InvalidResponse(Cow::from(response)));
                 continue;
             }
 
