@@ -163,7 +163,7 @@ impl Flasher {
     }
 
     fn send_command_with_data(&mut self, cmd: Command, data: &[u8]) -> Result<(u32, Vec<u8>)> {
-        let mut slip_data: Vec<u8> = Vec::with_capacity(64);
+        let mut packet: Vec<u8> = Vec::with_capacity(64);
         let cmd_code = cmd.code();
         let mut checksum = 0xEFu8;
         for x in data {
@@ -180,22 +180,22 @@ impl Flasher {
          *
          * Followed by data.
          */
-        slip_data.extend(&[0, cmd_code, 0, 0, checksum, 0, 0, 0]);
+        packet.extend(&[0, cmd_code, 0, 0, checksum, 0, 0, 0]);
         {
-            let mut cursor = Cursor::new(&mut slip_data);
+            let mut cursor = Cursor::new(&mut packet);
             cursor.set_position(8);
             cmd.write_with_args(&mut cursor, (self.rom_loader,))?;
         }
-        slip_data.extend(data);
+        packet.extend(data);
 
-        let len: u16 = (slip_data.len() - 8).try_into().expect("Data too long");
-        slip_data[2] = len as u8;
-        slip_data[3] = (len >> 8) as u8;
-        slip_data[4] = checksum;
+        let len: u16 = (packet.len() - 8).try_into().expect("Data too long");
+        packet[2] = len as u8;
+        packet[3] = (len >> 8) as u8;
+        packet[4] = checksum;
 
         let timeout = cmd.timeout();
         self.trace(Event::Command(cmd, Cow::Borrowed(data)));
-        self.send_packet(&slip_data)?;
+        self.send_packet(&packet)?;
         let response = self.read_response(cmd_code, timeout);
         if response.is_timeout() {
             self.trace(Event::CommandTimeout(cmd_code));
