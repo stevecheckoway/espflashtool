@@ -17,7 +17,7 @@ use std::cell::{Cell, RefCell};
 use std::cmp::min;
 use std::fmt::Write;
 use std::io;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::command::{Command, CommandError};
@@ -164,6 +164,54 @@ pub trait EventObserver {
     fn notify(&self, timestamp: Instant, event: &Event<'_>);
 }
 
+pub(crate) struct EventProvider {
+    observers: Rc<RefCell<Vec<Rc<dyn EventObserver>>>>,
+}
+
+impl EventProvider {
+    pub fn new() -> Self {
+        Self {
+            observers: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    pub fn add_observer(&mut self, observer: Rc<dyn EventObserver + 'static>) {
+        self.observers.borrow_mut().push(observer);
+    }
+
+    pub fn remove_observer(&mut self, observer: &Rc<dyn EventObserver + 'static>) {
+        // Rc::ptr_eq() cannot be used to compare two `Rc<dyn Trait>`s. The solution is to
+        // 1. get a reference, `&dyn Trait`;
+        // 2. convert to `*const dyn Trait`;
+        // 3. convert to `*const u8`; and then
+        // 4. compare via `==`.
+        let observer_addr = &**observer as *const dyn EventObserver as *const u8;
+        let mut observers = self.observers.borrow_mut();
+        if let Some(idx) = observers
+            .iter()
+            .position(|obs| observer_addr == &**obs as *const dyn EventObserver as *const u8)
+        {
+            observers.remove(idx);
+        }
+    }
+
+    pub fn send_event(&self, event: Event) {
+        let now = Instant::now();
+        // Remove any observers that have been dropped and notify the others.
+        for observer in self.observers.borrow().iter() {
+            observer.notify(now, &event);
+        }
+    }
+}
+
+impl Clone for EventProvider {
+    fn clone(&self) -> Self {
+        Self {
+            observers: Rc::clone(&self.observers),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct EventCollectorObserver(RefCell<Vec<(Instant, Event<'static>)>>);
 
@@ -178,8 +226,8 @@ impl EventCollector {
         }
     }
 
-    pub fn observer(&self) -> Weak<EventCollectorObserver> {
-        Rc::downgrade(&self.observer)
+    pub fn observer(&self) -> Rc<EventCollectorObserver> {
+        Rc::clone(&self.observer)
     }
 
     pub fn collect(self) -> Vec<(Instant, Event<'static>)> {
@@ -229,8 +277,8 @@ where
         }
     }
 
-    pub fn observer(&self) -> Weak<EventTracerObserver<W, F>> {
-        Rc::downgrade(&self.observer)
+    pub fn observer(&self) -> Rc<EventTracerObserver<W, F>> {
+        Rc::clone(&self.observer)
     }
 }
 

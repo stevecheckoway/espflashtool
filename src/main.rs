@@ -125,7 +125,7 @@ fn open_connection(args: &ArgMatches) -> Result<Flasher> {
                 _ => unreachable!(),
             }
         }
-        flasher.add_owned_observer(EventTracer::new(std::io::stderr(), move |event| {
+        flasher.add_observer(EventTracer::new(std::io::stderr(), move |event| {
             use espflashtool::event::Event::*;
             match event {
                 Reset | Command(..) | CommandTimeout(..) | Response(..) | InvalidResponse(..) => {

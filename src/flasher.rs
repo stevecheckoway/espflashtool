@@ -15,7 +15,7 @@
 use std::borrow::Cow;
 use std::cmp::{max, min};
 use std::io::{self, BufRead, BufReader, Cursor};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use binrw::{BinRead, BinWrite};
@@ -23,7 +23,7 @@ use serialport::SerialPort;
 
 use crate::chip::Chip;
 use crate::command::{Command, CommandError};
-use crate::event::{Event, EventObserver};
+use crate::event::{Event, EventObserver, EventProvider};
 use crate::stub::Stub;
 use crate::timeout::ErrorExt;
 use crate::Result;
@@ -51,44 +51,68 @@ pub enum FlasherError {
     InvalidStubHello,
 }
 
+struct TimeoutSerialPort {
+    inner: Box<dyn SerialPort>,
+    start: Instant,
+    timeout: Duration,
+    event_provider: EventProvider,
+}
+
+impl std::io::Read for TimeoutSerialPort {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let timeout = max(
+            DEFAULT_SERIAL_TIMEOUT,
+            self.timeout.saturating_sub(self.start.elapsed()),
+        );
+        self.inner.set_timeout(timeout)?;
+        let size = self.inner.read(buf)?;
+        self.event_provider
+            .send_event(Event::SerialRead(Cow::from(&buf[..size])));
+        Ok(size)
+    }
+}
+
 pub struct Flasher {
-    serial: BufReader<Box<dyn SerialPort>>,
+    serial: BufReader<TimeoutSerialPort>,
     status_size: usize,
     rom_loader: bool,
-    observers: Vec<Weak<dyn EventObserver>>,
-    owned_observers: Vec<Rc<dyn EventObserver>>,
     chip: Option<Chip>,
     attached: bool,
+    event_provider: EventProvider,
 }
 
 impl Flasher {
     pub fn new(path: &str) -> Result<Self> {
-        let serial = serialport::new(path, 115200).open()?;
+        let event_provider = EventProvider::new();
+        let serial = TimeoutSerialPort {
+            inner: serialport::new(path, 115200).open()?,
+            start: Instant::now(),
+            timeout: DEFAULT_SERIAL_TIMEOUT,
+            event_provider: event_provider.clone(),
+        };
+
         Ok(Flasher {
             serial: BufReader::new(serial),
             status_size: 0,
             rom_loader: true,
-            observers: Vec::new(),
-            owned_observers: Vec::new(),
             chip: None,
             attached: false,
+            event_provider,
         })
     }
 
-    pub fn add_observer<E>(&mut self, observer: Weak<E>)
-    where
-        E: EventObserver + 'static,
-    {
-        self.observers.push(observer);
-    }
-
-    pub fn add_owned_observer<O>(&mut self, observer: O)
+    pub fn add_observer<O>(&mut self, observer: O)
     where
         O: Into<Rc<dyn EventObserver + 'static>>,
     {
-        let observer = observer.into();
-        self.observers.push(Rc::downgrade(&observer));
-        self.owned_observers.push(observer);
+        self.event_provider.add_observer(observer.into());
+    }
+
+    pub fn remove_observer<O>(&mut self, observer: O)
+    where
+        O: AsRef<Rc<dyn EventObserver + 'static>>,
+    {
+        self.event_provider.remove_observer(observer.as_ref());
     }
 
     pub fn chip(&self) -> Result<Chip> {
@@ -107,7 +131,14 @@ impl Flasher {
 
     #[inline]
     fn serial(&mut self) -> &mut dyn SerialPort {
-        self.serial.get_mut().as_mut()
+        self.serial.get_mut().inner.as_mut()
+    }
+
+    #[inline]
+    fn set_timeout(&mut self, timeout: Duration) {
+        let tsp = self.serial.get_mut();
+        tsp.start = Instant::now();
+        tsp.timeout = timeout;
     }
 
     fn send_packet(&mut self, data: &[u8]) -> Result<()> {
@@ -115,46 +146,32 @@ impl Flasher {
         let mut output: Vec<u8> = Vec::with_capacity(data.len() + 8);
 
         encoder.encode(data, &mut output)?;
+        // Trace the SlipWrite after performing it because the encoder is
+        // extremely unlikely to fail when reading and write to memory and
+        // this lets the Cow own the data, potentially saving a copy later.
+        //
+        // In contrast, writing to the serial port is likely to fail. It's
+        // better to trace before the write happens to make debugging
+        // easier. We lose out on potentially saving a copy though.
         self.trace(Event::SlipWrite(Cow::from(data)));
+        self.trace(Event::SerialWrite(Cow::from(&output)));
 
         let serial = self.serial();
         serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
         serial.write_all(&output)?;
-        self.trace(Event::SerialWrite(Cow::from(output)));
         Ok(())
     }
 
     fn read_packet(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let read_start = Instant::now();
-        let mut decoder = slip_codec::SlipDecoder::new();
         let mut response: Vec<u8> = Vec::new();
+        let mut decoder = slip_codec::SlipDecoder::new();
 
-        self.serial().set_timeout(timeout)?;
-        loop {
-            let buffer = self.serial.fill_buf()?;
-            let mut cursor = Cursor::new(buffer);
-
-            match decoder.decode(&mut cursor, &mut response) {
-                Ok(_) => {
-                    // A complete packet has been decoded.
-                    let size = cursor.position() as usize;
-                    self.serial.consume(size);
-                    self.trace(Event::SlipRead(Cow::from(&response)));
-                    return Ok(response);
-                }
-                Err(slip_codec::SlipError::EndOfStream) => {
-                    // The decoder did not hit the end of the packet but did consume all of buffer.
-                    let len = buffer.len();
-                    self.serial.consume(len);
-                    let remaining_time = timeout.saturating_sub(read_start.elapsed());
-                    self.serial()
-                        .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, remaining_time))?;
-                }
-                Err(err) => {
-                    panic!("Programming error: decoder.decode() returned {:?}", err);
-                }
-            }
-        }
+        self.set_timeout(timeout);
+        decoder
+            .decode(&mut self.serial, &mut response)
+            .map_err(|err| Error::IOError(err.into()))?;
+        self.trace(Event::SlipRead(Cow::from(&response)));
+        Ok(response)
     }
 
     #[inline]
@@ -262,49 +279,20 @@ impl Flasher {
     }
 
     // Read a line of text.
-    // The first byte of the response must appear within `timeout` and subsequent
+    // If a complete line has not been received by the timeout, then subsequent
     // bytes must arrive within `DEFAULT_SERIAL_TIMEOUT`.
     pub fn read_line(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let read_start = Instant::now();
         let mut line: Vec<u8> = Vec::new();
 
-        self.serial().set_timeout(timeout)?;
-        loop {
-            let buffer = self.serial.fill_buf()?;
-
-            if let Some(idx) = buffer.iter().position(|&x| x == b'\n') {
-                line.extend(&buffer[..idx + 1]);
-                self.serial.consume(idx + 1);
-                self.trace(Event::SerialLine(Cow::from(&line)));
-                return Ok(line);
-            }
-            line.extend(buffer);
-            let len = buffer.len();
-            self.serial.consume(len);
-            let remaining_time = timeout.saturating_sub(read_start.elapsed());
-            self.serial()
-                .set_timeout(max(DEFAULT_SERIAL_TIMEOUT, remaining_time))?;
-        }
+        self.set_timeout(timeout);
+        self.serial.read_until(b'\n', &mut line)?;
+        self.trace(Event::SerialLine(Cow::from(&line)));
+        Ok(line)
     }
 
+    #[inline]
     fn trace(&mut self, event: Event) {
-        let now = Instant::now();
-        // Remove any observers that have been dropped and notify the others.
-        self.observers.retain(|observer| {
-            Weak::upgrade(observer).map_or(false, |observer| {
-                observer.notify(now, &event);
-                true
-            })
-        });
-    }
-
-    fn trace_only(&self, event: Event) {
-        let now = Instant::now();
-        for observer in &self.observers {
-            if let Some(observer) = Weak::upgrade(observer) {
-                observer.notify(now, &event);
-            }
-        }
+        self.event_provider.send_event(event);
     }
 
     pub fn connect(&mut self) -> Result<()> {
