@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+//#![allow(dead_code)]
 // Copyright 2022 Stephen Checkoway
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -81,24 +81,6 @@ impl<T> timeout::ErrorExt for Result<T, Error> {
     fn is_timeout(&self) -> bool {
         self.as_ref().err().map_or(false, |err| err.is_timeout())
     }
-}
-
-#[inline]
-fn from_le16(data: &[u8]) -> u16 {
-    let data: [u8; 2] = [data[0], data[1]];
-    u16::from_le_bytes(data)
-}
-
-#[inline]
-fn from_le24(data: &[u8]) -> u32 {
-    let data: [u8; 4] = [data[0], data[1], data[2], 0];
-    u32::from_le_bytes(data)
-}
-
-#[inline]
-fn from_le32(data: &[u8]) -> u32 {
-    let data: [u8; 4] = [data[0], data[1], data[2], data[3]];
-    u32::from_le_bytes(data)
 }
 
 #[inline]

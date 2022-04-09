@@ -154,15 +154,6 @@ impl Command {
         }
     }
 
-    pub fn response_data_len_from_code(code: u8, rom_loader: bool) -> usize {
-        match code {
-            0x02..=0x0B | 0x0D | 0x0F..=0x12 | 0xD0..=0xD3 => 0,
-            0x13 if rom_loader => 32,
-            0x13 => 16,
-            _ => usize::MAX,
-        }
-    }
-
     pub fn spi_attach(hd_pin: u32, q_pin: u32, d_pin: u32, cs_pin: u32, clk_pin: u32) -> Self {
         let f = |pin: u32| match pin {
             0..=30 => pin,
@@ -321,4 +312,41 @@ impl From<u8> for CommandError {
             _ => UnknownErrorCode,
         }
     }
+}
+
+// The stub loader and the ESP8266 ROM loaders use the final two bytes of data
+// for the status and error bytes. The various ESP32 ROM loaders use four
+// bytes: status, error, 0, 0.
+//
+// Unfortunately, it's not possible to know which ROM loader (or even the stub
+// loader) we're talking to for the first SYNC command. However, for all of
+// the commands and chips this flasher knows about, the length of the data
+// itself determines the size. Most responses have no data other than the
+// status/error. Command::SpiFlashMd5 is the only command which has any data
+// and that is only supported by the ESP32 and later.
+#[inline]
+fn status_size(data_len: u16) -> usize {
+    match data_len {
+        2 => 2,  // [stub, ESP8266]: status, error
+        4 => 4,  // [ESP32]:         status, error, 0, 0
+        18 => 2, // [stub]:          MD5 hash (bin), status, error
+        36 => 4, // [ESP32]:         MD5 hash (hex), status, error, 0, 0
+        _ => 2,  // This doesn't occur with the current commands and chips.
+    }
+}
+
+#[binrw]
+#[brw(little, magic = 0x01u8)]
+pub struct ResponsePacket {
+    pub cmd_code: u8,
+    #[br(temp, assert(data_size >= 2))]
+    #[bw(calc = data.len() as u16 + if reserved.is_none() { 2 } else { 4 })]
+    data_size: u16,
+    pub value: u32,
+    #[br(count = (data_size as usize).saturating_sub(status_size(data_size)))]
+    pub data: Vec<u8>,
+    pub status: u8,
+    pub error: u8,
+    #[br(if(status_size(data_size) == 4))]
+    pub reserved: Option<[u8; 2]>,
 }

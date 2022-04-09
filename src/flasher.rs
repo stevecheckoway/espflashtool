@@ -22,12 +22,12 @@ use binrw::{BinRead, BinWrite};
 use serialport::SerialPort;
 
 use crate::chip::Chip;
-use crate::command::{Command, CommandError};
+use crate::command::{Command, CommandError, ResponsePacket};
 use crate::event::{Event, EventObserver, EventProvider};
 use crate::stub::Stub;
 use crate::timeout::ErrorExt;
 use crate::Result;
-use crate::{from_be16, from_le, from_le16, from_le32, Error};
+use crate::{from_be16, from_le, Error};
 
 const DEFAULT_SERIAL_TIMEOUT: Duration = Duration::from_millis(10);
 
@@ -74,7 +74,6 @@ impl std::io::Read for TimeoutSerialPort {
 
 pub struct Flasher {
     serial: BufReader<TimeoutSerialPort>,
-    status_size: usize,
     rom_loader: bool,
     chip: Option<Chip>,
     attached: bool,
@@ -93,7 +92,6 @@ impl Flasher {
 
         Ok(Flasher {
             serial: BufReader::new(serial),
-            status_size: 0,
             rom_loader: true,
             chip: None,
             attached: false,
@@ -122,11 +120,6 @@ impl Flasher {
 
     pub fn set_chip(&mut self, chip: Chip) {
         self.chip = Some(chip);
-        if !self.rom_loader || chip == Chip::Esp8266 {
-            self.status_size = 2;
-        } else {
-            self.status_size = 4;
-        }
     }
 
     #[inline]
@@ -225,54 +218,29 @@ impl Flasher {
     // bytes must arrive within `DEFAULT_SERIAL_TIMEOUT`.
     fn read_response(&mut self, cmd_code: u8, timeout: Duration) -> Result<(u32, Vec<u8>)> {
         let start_time = Instant::now();
-        let expected_response_size =
-            Command::response_data_len_from_code(cmd_code, self.rom_loader);
 
         loop {
             let response = self.read_packet(timeout.saturating_sub(start_time.elapsed()))?;
+            let mut cursor = Cursor::new(&response);
+            match ResponsePacket::read(&mut cursor) {
+                Err(_) => self.trace(Event::InvalidResponse(Cow::from(response))),
+                Ok(ResponsePacket {
+                    cmd_code: cmd,
+                    value,
+                    data,
+                    status,
+                    error,
+                    ..
+                }) => {
+                    self.trace(Event::Response(cmd, status, error, value, Cow::from(&data)));
 
-            if response.len() < 10 // Smallest response packet is 10 or 12 bytes.
-                || response[0] != 1 // 1 = response, 0 = command.
-                || { // Size is invalid.
-                    let size = from_le16(&response[2..4]) as usize;
-                    size + 8 != response.len()
-                    || match (expected_response_size, self.status_size) {
-                        (usize::MAX, 0) => false,
-                        (usize::MAX, status_size) => size < status_size,
-                        (expected, 0) => size != expected + 2 && size != expected + 4,
-                        (expected, status_size) => size != expected + status_size,
+                    if cmd == cmd_code {
+                        match status {
+                            0 => return Ok((value, data.to_vec())),
+                            1 => return Err(CommandError::from(error).into()),
+                            _ => return Err(CommandError::InvalidResponse.into()),
+                        }
                     }
-                }
-            {
-                self.trace(Event::InvalidResponse(Cow::from(response)));
-                continue;
-            }
-
-            // The response has an appropriate header and enough data for a
-            // status (assuming we know how long the status is).
-            let cmd = response[1];
-            if self.status_size == 0 {
-                // Try to figure out the status size.
-                if expected_response_size == usize::MAX {
-                    return Err(FlasherError::MustSetChipFirst.into());
-                }
-                let size = from_le16(&response[2..4]) as usize;
-                let status_size = size.saturating_sub(expected_response_size);
-                // This was checked above in the match.
-                assert!(status_size == 2 || status_size == 4);
-                self.status_size = status_size;
-            }
-            let status = response[response.len() - self.status_size];
-            let err = response[response.len() - self.status_size + 1];
-            let value = from_le32(&response[4..8]);
-            let data = &response[8..response.len() - self.status_size];
-            self.trace(Event::Response(cmd, status, err, value, Cow::from(data)));
-
-            if cmd == cmd_code {
-                match status {
-                    0 => return Ok((value, data.to_vec())),
-                    1 => return Err(CommandError::from(err).into()),
-                    _ => return Err(CommandError::InvalidResponse.into()),
                 }
             }
         }
@@ -746,7 +714,6 @@ impl Flasher {
             return Err(FlasherError::InvalidStubHello.into());
         }
         self.rom_loader = false;
-        self.status_size = 2;
         Ok(())
     }
 }
