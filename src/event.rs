@@ -197,7 +197,7 @@ impl EventProvider {
 
     pub fn send_event(&self, event: Event) {
         let now = Instant::now();
-        // Remove any observers that have been dropped and notify the others.
+        // Notify all observers.
         for observer in self.observers.borrow().iter() {
             observer.notify(now, &event);
         }
@@ -253,7 +253,7 @@ impl EventObserver for EventCollectorObserver {
 }
 
 pub struct EventTracerObserver<W, F> {
-    writer: W,
+    writer: Cell<Option<W>>,
     filter: F,
     last: Cell<Option<Instant>>,
 }
@@ -270,7 +270,7 @@ where
     pub fn new(writer: W, filter: F) -> Self {
         EventTracer {
             observer: Rc::new(EventTracerObserver {
-                writer,
+                writer: Cell::new(Some(writer)),
                 filter,
                 last: Cell::new(None),
             }),
@@ -301,7 +301,11 @@ where
         if (self.filter)(event) {
             let delta =
                 (timestamp - self.last.replace(Some(timestamp)).unwrap_or(timestamp)).as_secs_f32();
-            println!("TRACE +{delta:.3} {event}");
+            if let Some(mut writer) = self.writer.take() {
+                if writeln!(writer, "TRACE +{delta:.3} {event}").is_ok() {
+                    self.writer.set(Some(writer));
+                }
+            }
         }
     }
 }
