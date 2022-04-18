@@ -85,7 +85,7 @@ impl<T> timeout::ErrorExt for Result<T, Error> {
 
 #[inline]
 fn from_le(data: &[u8]) -> u32 {
-    assert!(data.len() <= 4);
+    debug_assert!(data.len() <= 4);
     let mut le_data = [0u8; 4];
     (&mut le_data[..data.len()]).copy_from_slice(data);
     u32::from_le_bytes(le_data)

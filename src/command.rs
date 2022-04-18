@@ -12,13 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::min;
 use std::time::Duration;
 
 use binrw::binrw;
-
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(3000);
-const SYNC_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
 #[binrw]
@@ -26,7 +22,7 @@ const SYNC_TIMEOUT: Duration = Duration::from_millis(100);
 pub enum Command {
     // Commands supported by the ESP8266 & ESP32 bootloaders.
     FlashBegin {
-        total_size: u32,
+        erase_size: u32,
         num_packets: u32,
         packet_size: u32,
         flash_offset: u32,
@@ -91,8 +87,7 @@ pub enum Command {
         old_rate: u32,
     },
     FlashDeflBegin {
-        // Uncompressed size.
-        total_size: u32,
+        erase_size: u32,
         num_packets: u32,
         packet_size: u32,
         flash_offset: u32,
@@ -114,8 +109,7 @@ pub enum Command {
     // Stub-only commands.
     EraseFlash,
     EraseRegion {
-        // XXX: Is this the offset from the start of flash?
-        offset: u32,
+        flash_offset: u32,
         size: u32,
     },
     ReadFlash {
@@ -196,30 +190,20 @@ impl Command {
         }
     }
 
-    pub fn mem_begin(mem_offset: u32, total_size: u32) -> Self {
-        let packet_size = min(total_size, 0x4000);
-        Command::MemBegin {
-            total_size,
-            num_packets: (total_size + packet_size - 1) / packet_size,
-            packet_size,
-            mem_offset,
-        }
-    }
-
-    pub fn flash_begin(flash_offset: u32, total_size: u32) -> Self {
-        let packet_size = min(total_size, 0x4000);
-        Command::FlashBegin {
-            total_size,
-            num_packets: (total_size + packet_size - 1) / packet_size,
-            packet_size,
-            flash_offset,
-        }
-    }
-
     pub fn timeout(&self) -> Duration {
         match self {
-            Command::Sync => SYNC_TIMEOUT,
-            _ => DEFAULT_TIMEOUT,
+            Command::Sync => Duration::from_millis(100),
+            Command::MemEnd { .. } => Duration::from_millis(50),
+            Command::FlashBegin { .. }
+            | Command::FlashData { .. }
+            | Command::FlashEnd { .. }
+            | Command::FlashDeflBegin { .. }
+            | Command::FlashDeflData { .. }
+            | Command::FlashDeflEnd { .. }
+            | Command::SpiFlashMD5 { .. }
+            | Command::EraseFlash
+            | Command::EraseRegion { .. } => Duration::from_secs(120),
+            _ => Duration::from_secs(3),
         }
     }
 }

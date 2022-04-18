@@ -14,11 +14,13 @@
 
 use std::borrow::Cow;
 use std::cmp::{max, min};
-use std::io::{self, BufRead, BufReader, Cursor};
+use std::io::{self, BufRead, BufReader, Cursor, Write};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use binrw::{BinRead, BinWrite};
+use flate2::write::DeflateEncoder;
+use flate2::Compression;
 use serialport::SerialPort;
 
 use crate::chip::Chip;
@@ -30,6 +32,12 @@ use crate::Result;
 use crate::{from_be16, from_le, Error};
 
 const DEFAULT_SERIAL_TIMEOUT: Duration = Duration::from_millis(10);
+
+const MEM_PACKET_SIZE: usize = 0x1800; // 6 kB
+const FLASH_SECTOR_SIZE: usize = 0x1000; //  4 kB
+const ROM_PACKET_SIZE: usize = 0x400; //  1 kB
+const STUB_PACKET_SIZE: usize = 0x4000; // 16 kB
+const DATA_SIZE_MULTIPLE: usize = 4;
 
 const CHIP_MAGIC_REG: u32 = 0x40001000;
 
@@ -49,6 +57,12 @@ pub enum FlasherError {
 
     #[error("Invalid stub hello")]
     InvalidStubHello,
+
+    #[error("Flash offset not a multiple of 4096")]
+    MisalignedFlashOffset,
+
+    #[error("Stub loader already running")]
+    StubAlreadyRunning,
 }
 
 struct TimeoutSerialPort {
@@ -74,7 +88,7 @@ impl std::io::Read for TimeoutSerialPort {
 
 pub struct Flasher {
     serial: BufReader<TimeoutSerialPort>,
-    rom_loader: bool,
+    is_rom_loader: bool,
     chip: Option<Chip>,
     attached: bool,
     event_provider: EventProvider,
@@ -92,7 +106,7 @@ impl Flasher {
 
         Ok(Flasher {
             serial: BufReader::new(serial),
-            rom_loader: true,
+            is_rom_loader: true,
             chip: None,
             attached: false,
             event_provider,
@@ -194,7 +208,7 @@ impl Flasher {
         {
             let mut cursor = Cursor::new(&mut packet);
             cursor.set_position(8);
-            cmd.write_with_args(&mut cursor, (self.rom_loader,))?;
+            cmd.write_with_args(&mut cursor, (self.is_rom_loader,))?;
         }
         packet.extend(data);
 
@@ -443,13 +457,13 @@ impl Flasher {
 
     pub fn flash_begin(
         &mut self,
-        total_size: u32,
+        erase_size: u32,
         num_packets: u32,
         packet_size: u32,
         flash_offset: u32,
     ) -> Result<()> {
         self.send_command(Command::FlashBegin {
-            total_size,
+            erase_size,
             num_packets,
             packet_size,
             flash_offset,
@@ -479,13 +493,13 @@ impl Flasher {
         total_size: u32,
         num_packets: u32,
         packet_size: u32,
-        flash_offset: u32,
+        mem_offset: u32,
     ) -> Result<()> {
         self.send_command(Command::MemBegin {
             total_size,
             num_packets,
             packet_size,
-            mem_offset: flash_offset,
+            mem_offset,
         })?;
         Ok(())
     }
@@ -511,13 +525,13 @@ impl Flasher {
 
     pub fn flash_defl_begin(
         &mut self,
-        total_size: u32,
+        erase_size: u32,
         num_packets: u32,
         packet_size: u32,
         flash_offset: u32,
     ) -> Result<()> {
         self.send_command(Command::FlashDeflBegin {
-            total_size,
+            erase_size,
             num_packets,
             packet_size,
             flash_offset,
@@ -597,7 +611,7 @@ impl Flasher {
     }
 
     pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {
-        let old_rate = if self.rom_loader {
+        let old_rate = if self.is_rom_loader {
             0
         } else {
             self.serial().baud_rate()?
@@ -613,7 +627,7 @@ impl Flasher {
     pub fn spi_flash_md5(&mut self, address: u32, size: u32) -> Result<[u8; 16]> {
         let (_value, data) = self.send_command(Command::SpiFlashMD5 { address, size })?;
         let mut result = [0u8; 16];
-        if self.rom_loader {
+        if self.is_rom_loader {
             if data.len() != 32 || !data.iter().all(u8::is_ascii_hexdigit) {
                 return Err(CommandError::InvalidResponse.into());
             }
@@ -646,56 +660,107 @@ impl Flasher {
         Err(FlasherError::UnknownDevice(magic).into())
     }
 
-    /// Write `data` to RAM at address `addr`. If `entry` is `Some(entry_point)`, then
-    /// after receiving the data and writing it to ram, the loader will jump to the
-    /// `entry_point` address.
-    pub fn write_ram(&mut self, addr: u32, data: &[u8], entry: Option<u32>) -> Result<()> {
-        let packet_size = min(data.len(), 0x4000);
-        let total_size: u32 = data.len().try_into().unwrap();
-        let num_packets = (total_size + packet_size as u32 - 1) / packet_size as u32;
-        self.send_command(Command::MemBegin {
-            total_size,
-            num_packets,
-            packet_size: packet_size as u32,
-            mem_offset: addr,
-        })?;
-
-        for (num, chunk) in data.chunks(packet_size).enumerate() {
-            let chunk = if chunk.len() == packet_size {
-                Cow::Borrowed(chunk)
+    fn write_all_data(
+        &mut self,
+        data: &[u8],
+        packet_size: usize,
+        pad_last: bool,
+        data_fn: fn(&mut Self, u32, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for (sequence_num, chunk) in data.chunks(packet_size).enumerate() {
+            if !pad_last || chunk.len() == packet_size {
+                data_fn(self, sequence_num as u32, chunk)?;
             } else {
-                let mut owned: Vec<u8> = Vec::with_capacity(packet_size);
-                owned.extend(chunk);
-                owned.resize(packet_size, 0xFF);
-                Cow::Owned(owned)
-            };
-            self.send_command_with_data(
-                Command::MemData {
-                    data_size: packet_size as u32,
-                    sequence_num: num as u32,
-                },
-                &chunk,
-            )?;
-        }
-
-        if let Some(entry) = entry {
-            let ret = self.send_command(Command::MemEnd {
-                execute: 0,
-                entry_point: entry,
-            });
-
-            if !ret.is_timeout() {
-                return ret.map(|_| ());
+                let mut last_chunk = chunk.to_vec();
+                last_chunk.resize(packet_size, 0xFF);
+                data_fn(self, sequence_num as u32, &last_chunk)?;
             }
         }
         Ok(())
     }
 
-    // pub fn write_flash(&mut self, addr: u32, data: &[u8], compressed: bool, reboot: bool) -> Result<()> {
+    /// Write `data` to RAM at address `addr`. If `entry` is `Some(entry_point)`, then
+    /// after receiving the data and writing it to ram, the loader will jump to the
+    /// `entry_point` address.
+    pub fn write_ram(&mut self, addr: u32, data: &[u8], entry: Option<u32>) -> Result<()> {
+        let packet_size = min(data.len(), MEM_PACKET_SIZE);
+        let total_size: u32 = data.len().try_into().unwrap();
+        let num_packets = (total_size + packet_size as u32 - 1) / packet_size as u32;
+        self.mem_begin(total_size, num_packets, packet_size as u32, addr)?;
+        self.write_all_data(data, packet_size, true, Self::mem_data)?;
 
-    // }
+        if let Some(entry) = entry {
+            // The ROM loader may start executing the code before the
+            // transmit fifo is empty, so ignore timeouts.
+            let ret = self.mem_end(true, entry);
+
+            if !self.is_rom_loader || !ret.is_timeout() {
+                return ret;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn write_flash(
+        &mut self,
+        flash_offset: u32,
+        data: &[u8],
+        compress: bool,
+        reboot: bool,
+    ) -> Result<()> {
+        if flash_offset as usize & (FLASH_SECTOR_SIZE - 1) != 0 {
+            return Err(FlasherError::MisalignedFlashOffset.into());
+        }
+
+        let packet_size = if self.is_rom_loader {
+            ROM_PACKET_SIZE
+        } else {
+            STUB_PACKET_SIZE
+        };
+
+        let mask = DATA_SIZE_MULTIPLE - 1;
+        let padded_size = (data.len() + mask) & !mask;
+        let padding_size = padded_size - data.len();
+        let erase_size = if self.chip()? == Chip::Esp8266 {
+            todo!("ESP8266 has some bizarre erase bug");
+        } else {
+            padded_size as u32
+        };
+
+        if compress {
+            // Compress the data and the padding bytes.
+            let mut e = DeflateEncoder::new(Vec::new(), Compression::best());
+            e.write_all(data)?;
+            if padding_size > 0 {
+                let mut padding = Vec::with_capacity(padding_size);
+                padding.resize(padding_size, 0xFF);
+                e.write_all(&padding)?;
+            }
+            let compressed_data: Vec<u8> = e.finish()?;
+            let num_packets = ((compressed_data.len() + (packet_size - 1)) / packet_size) as u32;
+
+            // Send the FLASH_DEFL_BEGIN and FLASH_DEFL_DATA packets.
+            self.flash_defl_begin(erase_size, num_packets, packet_size as u32, flash_offset)?;
+            self.write_all_data(&compressed_data, packet_size, false, Self::flash_defl_data)?;
+        } else {
+            // Pad the final packet to packet_size.
+            let padded_size = (padded_size + packet_size - 1) & !(packet_size - 1);
+            let num_packets = (padded_size / packet_size) as u32;
+            self.flash_begin(erase_size, num_packets, packet_size as u32, flash_offset)?;
+            self.write_all_data(data, packet_size, true, Self::flash_data)?;
+        }
+
+        match (reboot, compress) {
+            (true, true) => self.flash_defl_end(reboot),
+            (true, false) => self.flash_end(reboot),
+            (false, _) => Ok(()),
+        }
+    }
 
     pub fn run_stub(&mut self, stub: &[u8]) -> Result<()> {
+        if !self.is_rom_loader {
+            return Err(FlasherError::StubAlreadyRunning.into());
+        }
         let stub = Stub::read(&mut Cursor::new(stub))?;
         let chip = stub
             .chip()
@@ -713,7 +778,7 @@ impl Flasher {
         if ohai != b"OHAI" {
             return Err(FlasherError::InvalidStubHello.into());
         }
-        self.rom_loader = false;
+        self.is_rom_loader = false;
         Ok(())
     }
 }
