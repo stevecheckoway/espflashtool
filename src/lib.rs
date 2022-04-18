@@ -20,6 +20,7 @@ pub mod event;
 mod flasher;
 pub mod image;
 pub mod partition;
+pub mod protocol;
 mod stub;
 
 pub use chip::Chip;

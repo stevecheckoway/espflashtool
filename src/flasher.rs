@@ -14,18 +14,18 @@
 
 use std::borrow::Cow;
 use std::cmp::{max, min};
-use std::io::{self, BufRead, BufReader, Cursor, Write};
+use std::io::{self, Cursor, Write};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use binrw::{BinRead, BinWrite};
+use binrw::BinRead;
 use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use serialport::SerialPort;
 
 use crate::chip::Chip;
-use crate::command::{Command, CommandError, ResponsePacket};
 use crate::event::{Event, EventObserver, EventProvider};
+use crate::protocol::Protocol;
 use crate::stub::Stub;
 use crate::timeout::ErrorExt;
 use crate::Result;
@@ -45,12 +45,6 @@ const CHIP_MAGIC_REG: u32 = 0x40001000;
 pub enum FlasherError {
     #[error("Unknown ESP device ({:08X})", .0)]
     UnknownDevice(u32),
-
-    #[error("Command cannot be sent without setting or detecting chip first")]
-    MustSetChipFirst,
-
-    #[error("SPI commands cannot be sent without attaching first")]
-    MustSpiAttachFirst,
 
     #[error("Invalid SPI command or address length")]
     InvalidSpiCommand,
@@ -87,29 +81,19 @@ impl std::io::Read for TimeoutSerialPort {
 }
 
 pub struct Flasher {
-    serial: BufReader<TimeoutSerialPort>,
-    is_rom_loader: bool,
+    protocol: Protocol,
     chip: Option<Chip>,
     attached: bool,
-    event_provider: EventProvider,
 }
 
 impl Flasher {
     pub fn new(path: &str) -> Result<Self> {
-        let event_provider = EventProvider::new();
-        let serial = TimeoutSerialPort {
-            inner: serialport::new(path, 115200).open()?,
-            start: Instant::now(),
-            timeout: DEFAULT_SERIAL_TIMEOUT,
-            event_provider: event_provider.clone(),
-        };
+        let serial = serialport::new(path, 115200).open()?;
 
         Ok(Flasher {
-            serial: BufReader::new(serial),
-            is_rom_loader: true,
+            protocol: Protocol::new(serial),
             chip: None,
             attached: false,
-            event_provider,
         })
     }
 
@@ -117,206 +101,50 @@ impl Flasher {
     where
         O: Into<Rc<dyn EventObserver + 'static>>,
     {
-        self.event_provider.add_observer(observer.into());
+        self.protocol.add_observer(observer);
     }
 
     pub fn remove_observer<O>(&mut self, observer: O)
     where
         O: AsRef<Rc<dyn EventObserver + 'static>>,
     {
-        self.event_provider.remove_observer(observer.as_ref());
+        self.protocol.remove_observer(observer);
     }
 
-    pub fn chip(&self) -> Result<Chip> {
+    pub fn connect(&mut self) -> Result<Chip> {
+        self.attached = false;
+        self.protocol.connect()?;
+        let magic = self.protocol.read_reg(CHIP_MAGIC_REG)?;
+        self.chip = Chip::try_from_magic(magic);
         self.chip
-            .ok_or_else(|| FlasherError::MustSetChipFirst.into())
+            .ok_or_else(|| FlasherError::UnknownDevice(magic).into())
     }
 
-    pub fn set_chip(&mut self, chip: Chip) {
-        self.chip = Some(chip);
+    fn ensure_connected(&mut self) -> Result<Chip> {
+        self.chip.ok_or(()).or_else(|_err| self.connect())
     }
 
-    #[inline]
-    fn serial(&mut self) -> &mut dyn SerialPort {
-        self.serial.get_mut().inner.as_mut()
-    }
-
-    #[inline]
-    fn set_timeout(&mut self, timeout: Duration) {
-        let tsp = self.serial.get_mut();
-        tsp.start = Instant::now();
-        tsp.timeout = timeout;
-    }
-
-    fn send_packet(&mut self, data: &[u8]) -> Result<()> {
-        let mut encoder = slip_codec::SlipEncoder::new(true);
-        let mut output: Vec<u8> = Vec::with_capacity(data.len() + 8);
-
-        encoder.encode(data, &mut output)?;
-        // Trace the SlipWrite after performing it because the encoder is
-        // extremely unlikely to fail when reading and write to memory and
-        // this lets the Cow own the data, potentially saving a copy later.
-        //
-        // In contrast, writing to the serial port is likely to fail. It's
-        // better to trace before the write happens to make debugging
-        // easier. We lose out on potentially saving a copy though.
-        self.trace(Event::SlipWrite(Cow::from(data)));
-        self.trace(Event::SerialWrite(Cow::from(&output)));
-
-        let serial = self.serial();
-        serial.set_timeout(DEFAULT_SERIAL_TIMEOUT)?;
-        serial.write_all(&output)?;
+    fn ensure_attached(&mut self) -> Result<()> {
+        let chip = self.ensure_connected()?;
+        if !self.attached {
+            if chip == Chip::Esp8266 {
+                self.protocol.flash_begin(0, 0, 0, 0)?;
+            } else {
+                self.protocol.spi_attach()?;
+            }
+            self.attached = true;
+        }
         Ok(())
     }
 
-    fn read_packet(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let mut response: Vec<u8> = Vec::new();
-        let mut decoder = slip_codec::SlipDecoder::new();
-
-        self.set_timeout(timeout);
-        decoder
-            .decode(&mut self.serial, &mut response)
-            .map_err(|err| Error::IOError(err.into()))?;
-        self.trace(Event::SlipRead(Cow::from(&response)));
-        Ok(response)
+    pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {
+        self.ensure_connected()?;
+        self.protocol.change_baud_rate(new_rate)
     }
 
     #[inline]
-    fn send_command(&mut self, cmd: Command) -> Result<(u32, Vec<u8>)> {
-        self.send_command_with_data(cmd, &[])
-    }
-
-    fn send_command_with_data(&mut self, cmd: Command, data: &[u8]) -> Result<(u32, Vec<u8>)> {
-        let mut packet: Vec<u8> = Vec::with_capacity(64);
-        let cmd_code = cmd.code();
-        let mut checksum = 0xEFu8;
-        for x in data {
-            checksum ^= *x;
-        }
-
-        /*
-         * A Command packet is sent as a SLIP frame with a header and data.
-         * Header
-         *   0: Direction, always 0x00
-         *   1: Command identifier
-         * 2-3: Length of data in little endian
-         * 4-7: Checksum for the *Data commands
-         *
-         * Followed by data.
-         */
-        packet.extend(&[0, cmd_code, 0, 0, checksum, 0, 0, 0]);
-        {
-            let mut cursor = Cursor::new(&mut packet);
-            cursor.set_position(8);
-            cmd.write_with_args(&mut cursor, (self.is_rom_loader,))?;
-        }
-        packet.extend(data);
-
-        let len: u16 = (packet.len() - 8).try_into().expect("Data too long");
-        packet[2] = len as u8;
-        packet[3] = (len >> 8) as u8;
-        packet[4] = checksum;
-
-        let timeout = cmd.timeout();
-        self.trace(Event::Command(cmd, Cow::Borrowed(data)));
-        self.send_packet(&packet)?;
-        let response = self.read_response(cmd_code, timeout);
-        if response.is_timeout() {
-            self.trace(Event::CommandTimeout(cmd_code));
-        }
-        response
-    }
-
-    // Read a response packet corresponding to the command with code `cmd_code`.
-    // The first byte of the response must appear within `timeout` and subsequent
-    // bytes must arrive within `DEFAULT_SERIAL_TIMEOUT`.
-    fn read_response(&mut self, cmd_code: u8, timeout: Duration) -> Result<(u32, Vec<u8>)> {
-        let start_time = Instant::now();
-
-        loop {
-            let response = self.read_packet(timeout.saturating_sub(start_time.elapsed()))?;
-            let mut cursor = Cursor::new(&response);
-            match ResponsePacket::read(&mut cursor) {
-                Err(_) => self.trace(Event::InvalidResponse(Cow::from(response))),
-                Ok(ResponsePacket {
-                    cmd_code: cmd,
-                    value,
-                    data,
-                    status,
-                    error,
-                    ..
-                }) => {
-                    self.trace(Event::Response(cmd, status, error, value, Cow::from(&data)));
-
-                    if cmd == cmd_code {
-                        match status {
-                            0 => return Ok((value, data.to_vec())),
-                            1 => return Err(CommandError::from(error).into()),
-                            _ => return Err(CommandError::InvalidResponse.into()),
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Read a line of text.
-    // If a complete line has not been received by the timeout, then subsequent
-    // bytes must arrive within `DEFAULT_SERIAL_TIMEOUT`.
-    pub fn read_line(&mut self, timeout: Duration) -> Result<Vec<u8>> {
-        let mut line: Vec<u8> = Vec::new();
-
-        self.set_timeout(timeout);
-        self.serial.read_until(b'\n', &mut line)?;
-        self.trace(Event::SerialLine(Cow::from(&line)));
-        Ok(line)
-    }
-
-    #[inline]
-    fn trace(&mut self, event: Event) {
-        self.event_provider.send_event(event);
-    }
-
-    pub fn connect(&mut self) -> Result<()> {
-        let timeout = Duration::from_millis(100);
-        let mut waiting = false;
-        'outer: for _ in 0..10 {
-            self.reset(true)?;
-            // Look for boot message.
-            for _ in 0..10 {
-                let line = self.read_line(timeout);
-                if line.is_timeout() || line? == b"waiting for download\r\n" {
-                    // XXX: Does the ESP8266 write this message but just at a different baud rate?
-                    waiting = true;
-                    break 'outer;
-                }
-            }
-        }
-        if !waiting {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Timed out waiting for \"waiting for download\\r\\n\"",
-            )
-            .into());
-        }
-        for _ in 0..10 {
-            let result = self.sync();
-            if result.is_timeout() {
-                continue;
-            }
-            result?;
-            break;
-        }
-
-        Ok(())
-    }
-
-    pub fn attach(&mut self) -> Result<()> {
-        if self.chip()? == Chip::Esp8266 {
-            self.flash_begin(0, 0, 0, 0)
-        } else {
-            self.spi_attach()
-        }
+    pub fn chip(&mut self) -> Result<Chip> {
+        self.ensure_connected()
     }
 
     pub fn flash_id(&mut self) -> Result<(u8, u16)> {
@@ -344,10 +172,8 @@ impl Flasher {
         {
             return Err(FlasherError::InvalidSpiCommand.into());
         }
-        let chip = self.chip()?;
-        if !self.attached {
-            self.spi_attach()?;
-        }
+        let chip = self.ensure_connected()?;
+        self.ensure_attached()?;
 
         // SPI_CMD_REG
         const SPI_USR: u32 = 1 << 18;
@@ -368,7 +194,8 @@ impl Flasher {
             command.to_be()
         } as u32;
         let user2_data = (command_len * 8 - 1) << 28 | command;
-        self.write_reg(regs.user2, user2_data, 0xFFFFFFFF, 0)?;
+        self.protocol
+            .write_reg(regs.user2, user2_data, 0xFFFFFFFF, 0)?;
 
         if address_len > 0 {
             user_data |= SPI_USR_ADDR;
@@ -384,7 +211,7 @@ impl Flasher {
                 4 => address.to_be(),
                 _ => unreachable!(),
             };
-            self.write_reg(regs.addr, address, 0xFFFFFFFF, 0)?;
+            self.protocol.write_reg(regs.addr, address, 0xFFFFFFFF, 0)?;
         }
         if dummy_cycles > 0 {
             user_data |= SPI_USR_DUMMY;
@@ -396,12 +223,13 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= data_len << 17;
             } else {
-                self.write_reg(regs.mosi_dlen, data_len, 0xFFFFFFFF, 0)?;
+                self.protocol
+                    .write_reg(regs.mosi_dlen, data_len, 0xFFFFFFFF, 0)?;
             }
 
             for (pos, val) in data.chunks(4).enumerate() {
                 let val = from_le(val);
-                self.write_reg(regs.w(pos), val, 0xFFFFFFFF, 0)?;
+                self.protocol.write_reg(regs.w(pos), val, 0xFFFFFFFF, 0)?;
             }
         }
         if !output.is_empty() {
@@ -410,15 +238,18 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= output_len << 8;
             } else {
-                self.write_reg(regs.miso_dlen, output_len, 0xFFFFFFFF, 0)?;
+                self.protocol
+                    .write_reg(regs.miso_dlen, output_len, 0xFFFFFFFF, 0)?;
             }
         }
-        self.write_reg(regs.user1, user1_data, 0xFFFFFFFF, 0)?;
-        self.write_reg(regs.user, user_data, 0xFFFFFFFF, 0)?;
-        self.write_reg(regs.cmd, SPI_USR, 0xFFFFFFFF, 0)?;
+        self.protocol
+            .write_reg(regs.user1, user1_data, 0xFFFFFFFF, 0)?;
+        self.protocol
+            .write_reg(regs.user, user_data, 0xFFFFFFFF, 0)?;
+        self.protocol.write_reg(regs.cmd, SPI_USR, 0xFFFFFFFF, 0)?;
 
         loop {
-            let cmd = self.read_reg(regs.cmd)?;
+            let cmd = self.protocol.read_reg(regs.cmd)?;
             if cmd & SPI_USR == 0 {
                 break;
             }
@@ -427,237 +258,16 @@ impl Flasher {
 
         // Read output.
         for (pos, output_val) in output.chunks_mut(4).enumerate() {
-            let val = self.read_reg(regs.w(pos))?.to_le_bytes();
+            let val = self.protocol.read_reg(regs.w(pos))?.to_le_bytes();
             output_val.copy_from_slice(&val[..output_val.len()]);
         }
         Ok(())
     }
 
     pub fn reset(&mut self, enter_bootloader: bool) -> Result<()> {
-        self.trace(Event::Reset);
-        self.serial.consume(self.serial.buffer().len());
-
-        let serial = self.serial();
-        serial.clear(serialport::ClearBuffer::All)?;
-
-        // /RTS is connected to EN
-        // /DTR is connected to GPIO0
-        serial.write_request_to_send(true)?;
-        serial.write_data_terminal_ready(false)?;
-        std::thread::sleep(Duration::from_millis(100));
-        serial.clear(serialport::ClearBuffer::All)?;
-
-        serial.write_data_terminal_ready(enter_bootloader)?;
-        serial.write_request_to_send(false)?;
-        std::thread::sleep(Duration::from_millis(500));
-        serial.write_data_terminal_ready(false)?;
-
-        Ok(())
-    }
-
-    pub fn flash_begin(
-        &mut self,
-        erase_size: u32,
-        num_packets: u32,
-        packet_size: u32,
-        flash_offset: u32,
-    ) -> Result<()> {
-        self.send_command(Command::FlashBegin {
-            erase_size,
-            num_packets,
-            packet_size,
-            flash_offset,
-        })?;
-        Ok(())
-    }
-
-    pub fn flash_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        self.send_command_with_data(
-            Command::FlashData {
-                sequence_num,
-                data_size: data.len() as u32,
-            },
-            data,
-        )?;
-        Ok(())
-    }
-
-    pub fn flash_end(&mut self, reboot: bool) -> Result<()> {
-        let reboot = if reboot { 0 } else { 1 };
-        self.send_command(Command::FlashEnd { reboot })?;
-        Ok(())
-    }
-
-    pub fn mem_begin(
-        &mut self,
-        total_size: u32,
-        num_packets: u32,
-        packet_size: u32,
-        mem_offset: u32,
-    ) -> Result<()> {
-        self.send_command(Command::MemBegin {
-            total_size,
-            num_packets,
-            packet_size,
-            mem_offset,
-        })?;
-        Ok(())
-    }
-
-    pub fn mem_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        self.send_command_with_data(
-            Command::MemData {
-                data_size: data.len() as u32,
-                sequence_num,
-            },
-            data,
-        )?;
-        Ok(())
-    }
-
-    pub fn mem_end(&mut self, execute: bool, entry_point: u32) -> Result<()> {
-        self.send_command(Command::MemEnd {
-            execute: if execute { 0 } else { 1 },
-            entry_point,
-        })?;
-        Ok(())
-    }
-
-    pub fn flash_defl_begin(
-        &mut self,
-        erase_size: u32,
-        num_packets: u32,
-        packet_size: u32,
-        flash_offset: u32,
-    ) -> Result<()> {
-        self.send_command(Command::FlashDeflBegin {
-            erase_size,
-            num_packets,
-            packet_size,
-            flash_offset,
-        })?;
-        Ok(())
-    }
-
-    pub fn flash_defl_data(&mut self, sequence_num: u32, data: &[u8]) -> Result<()> {
-        let data_size = data.len().try_into().expect("data too long");
-        self.send_command_with_data(
-            Command::FlashDeflData {
-                data_size,
-                sequence_num,
-            },
-            data,
-        )?;
-        Ok(())
-    }
-
-    pub fn flash_defl_end(&mut self, reboot: bool) -> Result<()> {
-        let reboot = if reboot { 0 } else { 1 };
-        self.send_command(Command::FlashDeflEnd { reboot })?;
-        Ok(())
-    }
-
-    pub fn sync(&mut self) -> Result<()> {
-        let cmd = Command::Sync;
-        let cmd_code = cmd.code();
-        let timeout = cmd.timeout();
-        self.send_command(cmd)?;
-
-        for _ in 0..100 {
-            match self.read_response(cmd_code, timeout) {
-                Ok(_) => (),
-                Err(err) if err.is_timeout() => return Ok(()),
-                Err(err) => return Err(err),
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn write_reg(&mut self, address: u32, value: u32, mask: u32, delay: u32) -> Result<()> {
-        self.send_command(Command::WriteReg {
-            address,
-            value,
-            mask,
-            delay,
-        })?;
-        Ok(())
-    }
-
-    pub fn read_reg(&mut self, address: u32) -> Result<u32> {
-        self.send_command(Command::ReadReg { address })
-            .map(|(value, _data)| value)
-    }
-
-    pub fn spi_set_params(&mut self, total_size: u32) -> Result<()> {
-        self.send_command(Command::SpiSetParams {
-            id: 0,
-            total_size,
-            block_size: 0x10000,
-            sector_size: 0x1000,
-            page_size: 0x100,
-            status_mask: 0xFFFF,
-        })?;
-        Ok(())
-    }
-
-    pub fn spi_attach(&mut self) -> Result<()> {
-        self.send_command(Command::SpiAttach {
-            pins: 0,
-            rom_only: 0,
-        })?;
-        self.attached = true;
-        Ok(())
-    }
-
-    pub fn change_baud_rate(&mut self, new_rate: u32) -> Result<()> {
-        let old_rate = if self.is_rom_loader {
-            0
-        } else {
-            self.serial().baud_rate()?
-        };
-        self.send_command(Command::ChangeBaudRate { new_rate, old_rate })?;
-        self.serial.consume(self.serial.buffer().len());
-        let serial = self.serial();
-        serial.flush()?;
-        serial.set_baud_rate(new_rate)?;
-        Ok(())
-    }
-
-    pub fn spi_flash_md5(&mut self, address: u32, size: u32) -> Result<[u8; 16]> {
-        let (_value, data) = self.send_command(Command::SpiFlashMD5 { address, size })?;
-        let mut result = [0u8; 16];
-        if self.is_rom_loader {
-            if data.len() != 32 || !data.iter().all(u8::is_ascii_hexdigit) {
-                return Err(CommandError::InvalidResponse.into());
-            }
-            let f = |x: u8| match x {
-                b'0'..=b'9' => x - b'0',
-                b'a'..=b'f' => x - b'a' + 10,
-                b'A'..=b'F' => x - b'A' + 10,
-                _ => unreachable!(),
-            };
-            for idx in 0..16 {
-                result[idx] = 16 * f(data[2 * idx]) + f(data[2 * idx + 1]);
-            }
-        } else {
-            if data.len() != 16 {
-                return Err(CommandError::InvalidResponse.into());
-            }
-            for (idx, byte) in data.iter().enumerate() {
-                result[idx] = *byte;
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn detect_chip(&mut self) -> Result<Chip> {
-        let magic = self.read_reg(CHIP_MAGIC_REG)?;
-        if let Some(chip) = Chip::try_from_magic(magic) {
-            self.set_chip(chip);
-            return Ok(chip);
-        }
-        Err(FlasherError::UnknownDevice(magic).into())
+        self.attached = false;
+        self.chip = None;
+        self.protocol.reset(enter_bootloader)
     }
 
     fn write_all_data(
@@ -665,15 +275,15 @@ impl Flasher {
         data: &[u8],
         packet_size: usize,
         pad_last: bool,
-        data_fn: fn(&mut Self, u32, &[u8]) -> Result<()>,
+        data_fn: fn(&mut Protocol, u32, &[u8]) -> Result<()>,
     ) -> Result<()> {
         for (sequence_num, chunk) in data.chunks(packet_size).enumerate() {
             if !pad_last || chunk.len() == packet_size {
-                data_fn(self, sequence_num as u32, chunk)?;
+                data_fn(&mut self.protocol, sequence_num as u32, chunk)?;
             } else {
                 let mut last_chunk = chunk.to_vec();
                 last_chunk.resize(packet_size, 0xFF);
-                data_fn(self, sequence_num as u32, &last_chunk)?;
+                data_fn(&mut self.protocol, sequence_num as u32, &last_chunk)?;
             }
         }
         Ok(())
@@ -683,18 +293,20 @@ impl Flasher {
     /// after receiving the data and writing it to ram, the loader will jump to the
     /// `entry_point` address.
     pub fn write_ram(&mut self, addr: u32, data: &[u8], entry: Option<u32>) -> Result<()> {
+        self.ensure_connected()?;
         let packet_size = min(data.len(), MEM_PACKET_SIZE);
         let total_size: u32 = data.len().try_into().unwrap();
         let num_packets = (total_size + packet_size as u32 - 1) / packet_size as u32;
-        self.mem_begin(total_size, num_packets, packet_size as u32, addr)?;
-        self.write_all_data(data, packet_size, true, Self::mem_data)?;
+        self.protocol
+            .mem_begin(total_size, num_packets, packet_size as u32, addr)?;
+        self.write_all_data(data, packet_size, true, Protocol::mem_data)?;
 
         if let Some(entry) = entry {
             // The ROM loader may start executing the code before the
             // transmit fifo is empty, so ignore timeouts.
-            let ret = self.mem_end(true, entry);
+            let ret = self.protocol.mem_end(true, entry);
 
-            if !self.is_rom_loader || !ret.is_timeout() {
+            if !self.protocol.is_rom_loader() || !ret.is_timeout() {
                 return ret;
             }
         }
@@ -711,8 +323,9 @@ impl Flasher {
         if flash_offset as usize & (FLASH_SECTOR_SIZE - 1) != 0 {
             return Err(FlasherError::MisalignedFlashOffset.into());
         }
+        let chip = self.ensure_connected()?;
 
-        let packet_size = if self.is_rom_loader {
+        let packet_size = if self.protocol.is_rom_loader() {
             ROM_PACKET_SIZE
         } else {
             STUB_PACKET_SIZE
@@ -721,7 +334,7 @@ impl Flasher {
         let mask = DATA_SIZE_MULTIPLE - 1;
         let padded_size = (data.len() + mask) & !mask;
         let padding_size = padded_size - data.len();
-        let erase_size = if self.chip()? == Chip::Esp8266 {
+        let erase_size = if chip == Chip::Esp8266 {
             todo!("ESP8266 has some bizarre erase bug");
         } else {
             padded_size as u32
@@ -740,32 +353,43 @@ impl Flasher {
             let num_packets = ((compressed_data.len() + (packet_size - 1)) / packet_size) as u32;
 
             // Send the FLASH_DEFL_BEGIN and FLASH_DEFL_DATA packets.
-            self.flash_defl_begin(erase_size, num_packets, packet_size as u32, flash_offset)?;
-            self.write_all_data(&compressed_data, packet_size, false, Self::flash_defl_data)?;
+            self.protocol.flash_defl_begin(
+                erase_size,
+                num_packets,
+                packet_size as u32,
+                flash_offset,
+            )?;
+            self.write_all_data(
+                &compressed_data,
+                packet_size,
+                false,
+                Protocol::flash_defl_data,
+            )?;
         } else {
             // Pad the final packet to packet_size.
             let padded_size = (padded_size + packet_size - 1) & !(packet_size - 1);
             let num_packets = (padded_size / packet_size) as u32;
-            self.flash_begin(erase_size, num_packets, packet_size as u32, flash_offset)?;
-            self.write_all_data(data, packet_size, true, Self::flash_data)?;
+            self.protocol
+                .flash_begin(erase_size, num_packets, packet_size as u32, flash_offset)?;
+            self.write_all_data(data, packet_size, true, Protocol::flash_data)?;
         }
 
         match (reboot, compress) {
-            (true, true) => self.flash_defl_end(reboot),
-            (true, false) => self.flash_end(reboot),
+            (true, true) => self.protocol.flash_defl_end(reboot),
+            (true, false) => self.protocol.flash_end(reboot),
             (false, _) => Ok(()),
         }
     }
 
     pub fn run_stub(&mut self, stub: &[u8]) -> Result<()> {
-        if !self.is_rom_loader {
+        let this_chip = self.ensure_connected()?;
+        if !self.protocol.is_rom_loader() {
             return Err(FlasherError::StubAlreadyRunning.into());
         }
         let stub = Stub::read(&mut Cursor::new(stub))?;
         let chip = stub
             .chip()
             .ok_or_else(|| Error::FormatError(format!("Unknown stub chip ID: {:X}", stub.chip)))?;
-        let this_chip = self.chip()?;
         if chip != this_chip {
             return Err(Error::FormatError(format!(
                 "Stub for {chip} not supported for {this_chip}"
@@ -773,12 +397,12 @@ impl Flasher {
         }
         self.write_ram(stub.text_start, &stub.text, None)?;
         self.write_ram(stub.data_start, &stub.data, Some(stub.entry))?;
-        let ohai = self.read_packet(DEFAULT_SERIAL_TIMEOUT)?;
+        let ohai = self.protocol.read_packet(DEFAULT_SERIAL_TIMEOUT)?;
 
         if ohai != b"OHAI" {
             return Err(FlasherError::InvalidStubHello.into());
         }
-        self.is_rom_loader = false;
+        self.protocol.set_rom_loader(false);
         Ok(())
     }
 }

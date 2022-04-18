@@ -144,7 +144,6 @@ fn open_connection(args: &ArgMatches) -> Result<Flasher> {
         None
     };
     flasher.connect()?;
-    flasher.detect_chip()?;
     if let Some(stub) = stub {
         flasher.run_stub(&stub)?;
     }
@@ -171,7 +170,6 @@ fn main() -> Result<()> {
         }
         "flash-id" => {
             let mut flasher = open_connection(&args)?;
-            flasher.attach()?;
             let (mid, did) = flasher.flash_id()?;
             println!("{mid:02X} {did:02X}");
             flasher.reset(false)?;
