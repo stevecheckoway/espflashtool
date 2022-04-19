@@ -171,7 +171,10 @@ fn main() -> Result<()> {
         "flash-id" => {
             let mut flasher = open_connection(&args)?;
             let (mid, did) = flasher.flash_id()?;
-            println!("{mid:02X} {did:02X}");
+            println!("Manufacturer ID: {mid:02X}");
+            println!("Device ID: {did:04X}");
+            let flash_size = flasher.flash_size()? as f64 / 1048576.0;
+            println!("Flash size: {flash_size} MB");
             flasher.reset(false)?;
         }
         "image-info" => {

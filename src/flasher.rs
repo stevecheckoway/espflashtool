@@ -57,6 +57,9 @@ pub enum FlasherError {
 
     #[error("Stub loader already running")]
     StubAlreadyRunning,
+
+    #[error("Cannot detect flash size")]
+    CannotDetectFlashSize,
 }
 
 struct TimeoutSerialPort {
@@ -84,6 +87,8 @@ pub struct Flasher {
     protocol: Protocol,
     chip: Option<Chip>,
     attached: bool,
+    flash_id: Option<(u8, u16)>,
+    flash_size: Option<usize>,
 }
 
 impl Flasher {
@@ -94,6 +99,8 @@ impl Flasher {
             protocol: Protocol::new(serial),
             chip: None,
             attached: false,
+            flash_id: None,
+            flash_size: None,
         })
     }
 
@@ -112,7 +119,10 @@ impl Flasher {
     }
 
     pub fn connect(&mut self) -> Result<Chip> {
+        self.chip = None;
         self.attached = false;
+        self.flash_id = None;
+
         self.protocol.connect()?;
         let magic = self.protocol.read_reg(CHIP_MAGIC_REG)?;
         self.chip = Chip::try_from_magic(magic);
@@ -148,9 +158,44 @@ impl Flasher {
     }
 
     pub fn flash_id(&mut self) -> Result<(u8, u16)> {
+        if let Some(flash_id) = self.flash_id {
+            return Ok(flash_id);
+        }
         let mut output = [0u8; 3];
         self.spi_command(0x9F, 1, 0, 0, 0, &[], &mut output)?;
-        Ok((output[0], from_be16(&output[1..3])))
+        let flash_id = (output[0], from_be16(&output[1..3]));
+        self.flash_id = Some(flash_id);
+        Ok(flash_id)
+    }
+
+    pub fn flash_size(&mut self) -> Result<usize> {
+        if let Some(size) = self.flash_size {
+            return Ok(size);
+        }
+        let flash_size = match self.ensure_connected()? {
+            Chip::Esp8266 => {
+                // Read EFUSE bits
+                // https://github.com/espressif/ESP8266_RTOS_SDK/blob/master/components/esp8266/include/esp8266/efuse_register.h
+                const EFUSE_DATA3_REG: u32 = 0x3FF0005C;
+                let efuse3 = self.protocol.read_reg(EFUSE_DATA3_REG)?;
+                match (efuse3 >> 26) & 3 {
+                    0 => 2 << 20, // 2 MB
+                    1 => 4 << 20, // 4 MB
+                    _ => return Err(FlasherError::CannotDetectFlashSize.into()),
+                }
+            }
+            _ => {
+                let (_mid, did) = self.flash_id()?;
+                let size_log = (did & 0xFF) as usize;
+
+                if !(18..=26).contains(&size_log) {
+                    return Err(FlasherError::CannotDetectFlashSize.into());
+                }
+                1 << size_log
+            }
+        };
+        self.flash_size = Some(flash_size);
+        Ok(flash_size)
     }
 
     #[allow(clippy::too_many_arguments)]
