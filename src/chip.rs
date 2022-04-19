@@ -76,16 +76,19 @@ impl Chip {
 
     pub fn spi_regs(self) -> SpiRegs {
         match self {
+            // SPI0
+            // https://github.com/espressif/ESP8266_RTOS_SDK/blob/d45071563cebe9ca520cbed2537dc840b4d6a1e6/components/esp8266/ld/esp8266.peripherals.ld#L14
             Chip::Esp8266 => SpiRegs {
-                cmd: 0x60000100,
-                addr: 0x60000104,
-                user: 0x6000011C,
-                user1: 0x60000120,
-                user2: 0x60000124,
+                cmd: 0x60000200,
+                addr: 0x60000204,
+                user: 0x6000021C,
+                user1: 0x60000220,
+                user2: 0x60000224,
                 mosi_dlen: 0,
                 miso_dlen: 0,
-                w0: 0x60000140,
+                w0: 0x60000240,
             },
+            // SPI1
             Chip::Esp32 => SpiRegs {
                 cmd: 0x3FF42000,
                 addr: 0x3FF42004,
@@ -96,6 +99,7 @@ impl Chip {
                 miso_dlen: 0x3FF4202C,
                 w0: 0x3FF42080,
             },
+            // SPI1 (PeriBUS1)
             Chip::Esp32S2 => SpiRegs {
                 cmd: 0x3F402000,
                 addr: 0x3F402004,
@@ -104,8 +108,12 @@ impl Chip {
                 user2: 0x3F402020,
                 mosi_dlen: 0x3F402024,
                 miso_dlen: 0x3F402028,
-                w0: 0x3F402098,
+                // There appears to be a bug in the technical reference manual and the ESP-IDF
+                // https://github.com/espressif/esp-idf/blob/8b4e032255532d0d318b278dd670365e2b16f7a3/components/soc/esp32s2/include/soc/spi_reg.h#L1752
+                // that show the offset as being 0x98.
+                w0: 0x3F402058,
             },
+            // SPI1 on the ESP32-C3; the same registers seem to work on the ESP32-S3.
             Chip::Esp32S3 | Chip::Esp32C3 => SpiRegs {
                 cmd: 0x60002000,
                 addr: 0x60002004,
