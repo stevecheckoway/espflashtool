@@ -60,6 +60,9 @@ pub enum FlasherError {
 
     #[error("Cannot detect flash size")]
     CannotDetectFlashSize,
+
+    #[error("Data does not fit in flash at the given offset")]
+    DataTooLarge,
 }
 
 struct TimeoutSerialPort {
@@ -379,6 +382,10 @@ impl Flasher {
         } else {
             padded_size as u32
         };
+
+        if flash_offset + erase_size > self.flash_size()? as u32 {
+            return Err(FlasherError::DataTooLarge.into());
+        }
 
         if compress {
             // Compress the data and the padding bytes.
