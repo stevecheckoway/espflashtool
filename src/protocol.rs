@@ -413,12 +413,12 @@ impl Protocol {
         Ok(())
     }
 
-    pub fn write_reg(&mut self, address: u32, value: u32, mask: u32, delay: u32) -> Result<()> {
+    pub fn write_reg(&mut self, address: u32, value: u32) -> Result<()> {
         self.send_command(Command::WriteReg {
             address,
             value,
-            mask,
-            delay,
+            mask: 0xFFFFFFFF,
+            delay: 0,
         })?;
         Ok(())
     }

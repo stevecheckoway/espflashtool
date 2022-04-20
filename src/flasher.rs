@@ -239,8 +239,7 @@ impl Flasher {
             command.to_be()
         } as u32;
         let user2_data = (command_len * 8 - 1) << 28 | command;
-        self.protocol
-            .write_reg(regs.user2, user2_data, 0xFFFFFFFF, 0)?;
+        self.protocol.write_reg(regs.user2, user2_data)?;
 
         if address_len > 0 {
             user_data |= SPI_USR_ADDR;
@@ -256,7 +255,7 @@ impl Flasher {
                 4 => address.to_be(),
                 _ => unreachable!(),
             };
-            self.protocol.write_reg(regs.addr, address, 0xFFFFFFFF, 0)?;
+            self.protocol.write_reg(regs.addr, address)?;
         }
         if dummy_cycles > 0 {
             user_data |= SPI_USR_DUMMY;
@@ -268,13 +267,12 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= data_len << 17;
             } else {
-                self.protocol
-                    .write_reg(regs.mosi_dlen, data_len, 0xFFFFFFFF, 0)?;
+                self.protocol.write_reg(regs.mosi_dlen, data_len)?;
             }
 
             for (pos, val) in data.chunks(4).enumerate() {
                 let val = from_le(val);
-                self.protocol.write_reg(regs.w(pos), val, 0xFFFFFFFF, 0)?;
+                self.protocol.write_reg(regs.w(pos), val)?;
             }
         }
         if !output.is_empty() {
@@ -283,15 +281,12 @@ impl Flasher {
             if chip == Chip::Esp8266 {
                 user1_data |= output_len << 8;
             } else {
-                self.protocol
-                    .write_reg(regs.miso_dlen, output_len, 0xFFFFFFFF, 0)?;
+                self.protocol.write_reg(regs.miso_dlen, output_len)?;
             }
         }
-        self.protocol
-            .write_reg(regs.user1, user1_data, 0xFFFFFFFF, 0)?;
-        self.protocol
-            .write_reg(regs.user, user_data, 0xFFFFFFFF, 0)?;
-        self.protocol.write_reg(regs.cmd, SPI_USR, 0xFFFFFFFF, 0)?;
+        self.protocol.write_reg(regs.user1, user1_data)?;
+        self.protocol.write_reg(regs.user, user_data)?;
+        self.protocol.write_reg(regs.cmd, SPI_USR)?;
 
         loop {
             let cmd = self.protocol.read_reg(regs.cmd)?;
